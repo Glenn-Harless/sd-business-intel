@@ -335,7 +335,7 @@ def get_businesses(
         FROM '{biz_path}'
         {where}
         ORDER BY business_name
-        LIMIT {min(limit, 500)}
+        LIMIT {min(limit, 5000)}
     """
 
     con = duckdb.connect()

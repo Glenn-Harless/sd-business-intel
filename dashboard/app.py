@@ -11,14 +11,14 @@ import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 
-# ── Parquet paths ──
+from api import queries
+
+# ── Parquet paths (kept for dashboard-specific queries that have no query-layer equivalent) ──
 _AGG = "data/aggregated"
-_PROCESSED = "data/processed"
 
 _root = Path(__file__).resolve().parent.parent
 if (_root / _AGG).exists():
     _AGG = str(_root / _AGG)
-    _PROCESSED = str(_root / _PROCESSED)
 
 st.set_page_config(
     page_title="sd business intel",
@@ -43,8 +43,12 @@ def _valid(val) -> bool:
     return True
 
 
-def query(sql: str, params: list | None = None):
-    """Run SQL against parquet files and return a pandas DataFrame."""
+def _dashboard_query(sql: str, params: list | None = None):
+    """Run SQL against parquet files and return a pandas DataFrame.
+
+    Kept for the few dashboard-specific queries that have no query-layer
+    equivalent: zip+neighborhood options and city averages for metric deltas.
+    """
     con = duckdb.connect()
     return con.execute(sql, params or []).fetchdf()
 
@@ -56,8 +60,13 @@ st.sidebar.caption("neighborhood explorer")
 
 @st.cache_data(ttl=3600)
 def _zip_options():
+    """Get zip+neighborhood pairs for the sidebar selector.
+
+    Uses a direct query because get_filters() only returns zip codes
+    without neighborhood names.
+    """
     try:
-        df = query(f"""
+        df = _dashboard_query(f"""
             SELECT np.zip_code, np.neighborhood
             FROM '{_AGG}/neighborhood_profile.parquet' np
             ORDER BY np.zip_code
@@ -104,336 +113,97 @@ if st.session_state.get("_explorer_zip") != selected_zip:
 
 
 @st.cache_data(ttl=3600)
-def _load_profile(zip_code: str):
-    return query(
-        f"SELECT * FROM '{_AGG}/neighborhood_profile.parquet' WHERE zip_code = $1",
-        [zip_code],
-    )
+def _load_profile(zip_code: str) -> dict:
+    """Load a full neighborhood profile via the query layer."""
+    return queries.get_neighborhood_profile(zip_code)
 
 
 @st.cache_data(ttl=3600)
 def _load_city_avg():
-    try:
-        return query(f"SELECT * FROM '{_AGG}/city_averages.parquet'")
-    except Exception:
-        return None
+    """Load city-wide averages for metric delta display.
 
-
-@st.cache_data(ttl=3600)
-def _load_biz_by_zip(zip_code: str):
+    Uses a direct query because the query layer embeds comparison data
+    inside each profile but doesn't expose a standalone city averages
+    endpoint — and the dashboard needs avg values for metric deltas
+    across all displayed metrics (including median_age which isn't in
+    the profile's comparison_to_avg).
+    """
     try:
-        return query(
-            f"""
-            SELECT category, active_count, total_count
-            FROM '{_AGG}/business_by_zip.parquet'
-            WHERE zip_code = $1
-            ORDER BY active_count DESC
-            LIMIT 15
-            """,
-            [zip_code],
-        )
+        return _dashboard_query(f"SELECT * FROM '{_AGG}/city_averages.parquet'")
     except Exception:
         return None
 
 
 @st.cache_data(ttl=3600)
 def _load_businesses(zip_code: str, category: str | None = None):
-    try:
-        where = "WHERE zip_code = $1"
-        params = [zip_code]
-        if category:
-            where += " AND category = $2"
-            params.append(category)
-        return query(
-            f"""
-            SELECT business_name, address, category, naics_code, start_date, status
-            FROM '{_PROCESSED}/businesses.parquet'
-            {where}
-            ORDER BY business_name
-            LIMIT 5000
-            """,
-            params,
-        )
-    except Exception:
-        return None
+    """Load individual business records via the query layer."""
+    rows = queries.get_businesses(zip_code=zip_code, category=category, limit=5000)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
 def _category_options():
-    try:
-        df = query(f"""
-            SELECT DISTINCT category
-            FROM '{_AGG}/business_by_zip.parquet'
-            ORDER BY category
-        """)
-        return df["category"].tolist()
-    except Exception:
-        return []
+    """Get distinct business categories via the query layer."""
+    filters = queries.get_filters()
+    return filters.get("categories", [])
 
 
-# Metric → (SQL direction for "best" rank, sense for badge phrasing).
+# Metric → sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
-_RANK_METRICS = {
-    "population": ("DESC", "high"),
-    "median_income": ("DESC", "high"),
-    "median_age": ("DESC", "neutral"),
-    "median_home_value": ("DESC", "neutral"),
-    "median_rent": ("ASC", "low"),
-    "pct_bachelors_plus": ("DESC", "high"),
-    "active_count": ("DESC", "high"),
-    "businesses_per_1k": ("DESC", "high"),
-    "new_permits": ("DESC", "high"),
-    "crime_count": ("ASC", "low"),
-    "median_311_days": ("ASC", "low"),
-    "solar_installs": ("DESC", "high"),
+_RANK_SENSE = {
+    "population": "high",
+    "median_income": "high",
+    "median_age": "neutral",
+    "median_home_value": "neutral",
+    "median_rent": "low",
+    "pct_bachelors_plus": "high",
+    "active_count": "high",
+    "businesses_per_1k": "high",
+    "new_permits": "high",
+    "crime_count": "low",
+    "median_311_days": "low",
+    "solar_installs": "high",
 }
 
 
 @st.cache_data(ttl=3600)
-def _load_percentiles(zip_code: str) -> dict:
-    """Compute rank of each metric across all 82 zips for this zip code."""
-    rank_cols = []
-    for m, (d, _) in _RANK_METRICS.items():
-        rank_cols.append(
-            f"RANK() OVER (ORDER BY {m} {d} NULLS LAST) AS {m}_rank"
-        )
-        rank_cols.append(f"COUNT({m}) OVER () AS {m}_of")
-    try:
-        df = query(f"""
-            WITH ranked AS (
-                SELECT zip_code, {', '.join(rank_cols)}
-                FROM '{_AGG}/neighborhood_profile.parquet'
-            )
-            SELECT * FROM ranked WHERE zip_code = $1
-        """, [zip_code])
-    except Exception:
-        return {}
-    if df.empty:
-        return {}
-    rr = df.iloc[0]
-    result = {}
-    for m, (_, sense) in _RANK_METRICS.items():
-        r = rr.get(f"{m}_rank")
-        o = rr.get(f"{m}_of")
-        if r is not None and o is not None:
-            r, o = int(r), int(o)
-            if r <= o:  # skip NULLs (rank exceeds count)
-                result[m] = {"rank": r, "of": o, "sense": sense}
-    return result
-
-
-_VALID_RANKING_SORT = frozenset({
-    "population", "median_income", "median_age", "median_rent",
-    "median_home_value", "pct_bachelors_plus", "active_count",
-    "businesses_per_1k", "category_count", "new_permits",
-    "crime_count", "median_311_days", "solar_installs",
-})
-
-
-@st.cache_data(ttl=3600)
 def _load_rankings(sort_by, sort_desc, category, limit):
-    direction = "DESC" if sort_desc else "ASC"
-    profile = f"{_AGG}/neighborhood_profile.parquet"
-
-    if sort_by == "category_per_1k" and not category:
+    """Load zip code rankings via the query layer."""
+    rows = queries.get_rankings(sort_by=sort_by, sort_desc=sort_desc,
+                                category=category, limit=limit)
+    if not rows or (len(rows) == 1 and "error" in rows[0]):
         return pd.DataFrame()
-    if sort_by != "category_per_1k" and sort_by not in _VALID_RANKING_SORT:
-        return pd.DataFrame()
-
-    if category:
-        biz = f"{_AGG}/business_by_zip.parquet"
-        select = ["np.zip_code", "np.neighborhood"]
-        if sort_by != "category_per_1k":
-            select.append(f"np.{sort_by}")
-        select.extend([
-            "COALESCE(bz.active_count, 0) AS category_active",
-            """CASE WHEN np.population > 0
-                 THEN ROUND(1000.0 * COALESCE(bz.active_count, 0) / np.population, 2)
-                 ELSE NULL END AS category_per_1k""",
-        ])
-        for c in ("population", "median_income", "active_count"):
-            if c != sort_by:
-                select.append(f"np.{c}")
-
-        order = "category_per_1k" if sort_by == "category_per_1k" else f"np.{sort_by}"
-        where = "" if sort_by == "category_per_1k" else f"WHERE np.{sort_by} IS NOT NULL"
-
-        return query(f"""
-            SELECT {', '.join(select)}
-            FROM '{profile}' np
-            LEFT JOIN '{biz}' bz
-                ON np.zip_code = bz.zip_code AND bz.category = $1
-            {where}
-            ORDER BY {order} {direction} NULLS LAST
-            LIMIT {min(limit, 82)}
-        """, [category])
-
-    context = [c for c in ("population", "median_income", "active_count") if c != sort_by]
-    cols = ", ".join(["zip_code", "neighborhood", sort_by] + context)
-
-    return query(f"""
-        SELECT {cols}
-        FROM '{profile}'
-        WHERE {sort_by} IS NOT NULL
-        ORDER BY {sort_by} {direction}
-        LIMIT {min(limit, 82)}
-    """)
+    df = pd.DataFrame(rows)
+    # The query layer returns the sort metric as "sort_value". Rename to
+    # the actual metric name so the display code can reference it directly.
+    if "sort_value" in df.columns and sort_by != "category_per_1k":
+        df.rename(columns={"sort_value": sort_by}, inplace=True)
+    # Drop internal columns not needed for display
+    for col in ("sort_metric", "rank", "category"):
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True)
+    return df
 
 
 # ── Load data for selected zip ──
 profile = _load_profile(selected_zip)
 city_avg = _load_city_avg()
-biz_by_zip = _load_biz_by_zip(selected_zip)
-percentiles = _load_percentiles(selected_zip)
 
-if profile.empty:
+if "error" in profile:
     st.warning(f"no data for zip code {selected_zip}")
     st.stop()
 
-row = profile.iloc[0]
+# Extract flat values from the nested profile for metric display
+_demo = profile.get("demographics", {})
+_biz = profile.get("business_landscape", {})
+_civic = profile.get("civic_signals", {})
+percentiles = profile.get("percentiles", {})
+
 has_avg = city_avg is not None and not city_avg.empty
 avg_row = city_avg.iloc[0] if has_avg else None
 
 
 # ── Helpers ──
-
-
-def _build_narrative(row, avg_row) -> str:
-    """Generate a one-sentence narrative comparing this zip to city averages."""
-    if avg_row is None:
-        return ""
-
-    # (row_key, avg_key, label, higher_is, less_word)
-    metrics = [
-        ("population", "avg_population", "people", "good", "fewer"),
-        ("median_income", "avg_median_income", "income", "good", "lower"),
-        ("pct_bachelors_plus", "avg_pct_bachelors_plus", "college grads", "good", "fewer"),
-        ("active_count", "avg_active_businesses", "businesses", "good", "fewer"),
-        ("businesses_per_1k", "avg_businesses_per_1k", "businesses per capita", "good", "fewer"),
-        ("crime_count", "avg_crime_count", "crime", "bad", "less"),
-        ("median_311_days", "avg_median_311_days", "311 response time", "bad", "less"),
-        ("new_permits", "avg_new_permits", "new permits", "good", "fewer"),
-        ("median_rent", "avg_median_rent", "rent", "bad", "lower"),
-    ]
-
-    scored = []
-
-    for row_key, avg_key, label, higher_is, less_word in metrics:
-        val = row.get(row_key)
-        avg_val = avg_row.get(avg_key)
-        if not _valid(val) or not _valid(avg_val) or float(avg_val) == 0:
-            continue
-
-        ratio = float(val) / float(avg_val)
-
-        if 0.9 <= ratio <= 1.1:
-            continue
-
-        if ratio > 10.0:
-            clause = f"far more {label}"
-        elif ratio >= 2.0:
-            clause = f"{ratio:.0f}x the {label}"
-        elif ratio > 1.1:
-            clause = f"{(ratio - 1) * 100:.0f}% more {label}"
-        elif ratio < 0.1:
-            clause = f"far {less_word} {label}"
-        elif ratio < 0.5:
-            inv = 1 / ratio
-            clause = f"1/{inv:.0f} the {label}"
-        else:
-            clause = f"{(1 - ratio) * 100:.0f}% {less_word} {label}"
-
-        is_higher = ratio > 1.0
-        is_positive = (is_higher and higher_is == "good") or (not is_higher and higher_is == "bad")
-        scored.append((abs(ratio - 1), clause, is_positive))
-
-    if not scored:
-        return "close to city average across most metrics"
-
-    scored.sort(key=lambda t: t[0], reverse=True)
-    top = scored[:5]
-
-    positives = [clause for _, clause, pos in top if pos]
-    negatives = [clause for _, clause, pos in top if not pos]
-
-    parts = []
-    if positives:
-        parts.append(", ".join(positives))
-    if negatives:
-        parts.append(", ".join(negatives))
-
-    return "compared to the avg sd zip code: " + " — but ".join(parts)
-
-
-def _build_comparison_narrative(row_a, row_b, name_a, name_b) -> str:
-    """Generate a head-to-head narrative comparing two zip codes."""
-    # (key, label, higher_is, less_word)
-    metrics = [
-        ("population", "people", "good", "fewer"),
-        ("median_income", "income", "good", "lower"),
-        ("pct_bachelors_plus", "college grads", "good", "fewer"),
-        ("active_count", "businesses", "good", "fewer"),
-        ("businesses_per_1k", "businesses per capita", "good", "fewer"),
-        ("crime_count", "crime", "bad", "less"),
-        ("median_311_days", "311 response time", "bad", "less"),
-        ("new_permits", "new permits", "good", "fewer"),
-        ("median_rent", "rent", "bad", "lower"),
-    ]
-
-    a_wins = []
-    b_wins = []
-
-    for key, label, higher_is, less_word in metrics:
-        val_a = row_a.get(key)
-        val_b = row_b.get(key)
-        if not _valid(val_a) or not _valid(val_b):
-            continue
-        fa, fb = float(val_a), float(val_b)
-        if fa == fb:
-            continue
-
-        a_higher = fa > fb
-        bigger, smaller = (fa, fb) if a_higher else (fb, fa)
-
-        if smaller > 0:
-            ratio = bigger / smaller
-            if ratio > 10.0:
-                mag = "far"
-            elif ratio >= 2.0:
-                mag = f"{ratio:.0f}x"
-            else:
-                mag = f"{(ratio - 1) * 100:.0f}%"
-        else:
-            mag = "far"
-
-        winner_is_a = a_higher if higher_is == "good" else not a_higher
-        # clause from winner's perspective: winner always has the "good" side
-        if higher_is == "good":
-            clause = f"{mag} more {label}"
-        else:
-            clause = f"{mag} {less_word} {label}"
-
-        score = abs(fa - fb) / max(abs(fa), abs(fb), 1)
-        if winner_is_a:
-            a_wins.append((score, clause))
-        else:
-            b_wins.append((score, clause))
-
-    a_wins.sort(key=lambda t: t[0], reverse=True)
-    b_wins.sort(key=lambda t: t[0], reverse=True)
-
-    parts = []
-    top_a = [c for _, c in a_wins[:3]]
-    top_b = [c for _, c in b_wins[:3]]
-    if top_a:
-        parts.append(f"{name_a} has {', '.join(top_a)}")
-    if top_b:
-        parts.append(f"{name_b} has {', '.join(top_b)}")
-
-    if not parts:
-        return f"{name_a} and {name_b} are similar across most metrics"
-
-    return " — ".join(parts)
 
 
 def _fmt_metric(label, val, avg_key=None, prefix="", decimals=0):
@@ -478,7 +248,8 @@ def _show_rank(col, metric_key, percentiles):
     if not percentiles or metric_key not in percentiles:
         return
     p = percentiles[metric_key]
-    rank, of, sense = p["rank"], p["of"], p["sense"]
+    rank, of = p["rank"], p["of"]
+    sense = _RANK_SENSE.get(metric_key, "neutral")
     if sense == "low":
         text = f"{_ordinal(rank)} lowest of {of}"
     elif sense == "high":
@@ -539,18 +310,18 @@ with tab_explorer:
     st.title(f"{selected_neighborhood or selected_zip}")
     st.caption(f"zip code {selected_zip}")
 
-    narrative = _build_narrative(row, avg_row)
+    narrative = profile.get("narrative", "")
     if narrative:
         st.markdown(f"*{narrative}*")
 
     # Row 1: demographics
-    pop = row.get("population")
-    income = row.get("median_income")
-    active_biz = row.get("active_count")
-    age = row.get("median_age")
-    rent = row.get("median_rent")
-    home_val = row.get("median_home_value")
-    edu = row.get("pct_bachelors_plus")
+    pop = _demo.get("population")
+    income = _demo.get("median_income")
+    active_biz = _biz.get("active_count")
+    age = _demo.get("median_age")
+    rent = _demo.get("median_rent")
+    home_val = _demo.get("median_home_value")
+    edu = _demo.get("pct_bachelors_plus")
 
     r1 = st.columns(3)
     l, v, d = _fmt_metric("population", pop, "avg_population")
@@ -579,10 +350,10 @@ with tab_explorer:
     r3[0].metric(l, v, d, delta_color="normal")
     _show_rank(r3[0], "pct_bachelors_plus", percentiles)
 
-    permits = row.get("new_permits")
-    crime = row.get("crime_count")
-    solar = row.get("solar_installs")
-    median_311 = row.get("median_311_days")
+    permits = _civic.get("new_permits")
+    crime = _civic.get("crime_count")
+    solar = _civic.get("solar_installs")
+    median_311 = _civic.get("median_311_days")
 
     l, v, d = _fmt_metric("crime count", crime)
     r3[1].metric(l, v, d, delta_color="inverse")
@@ -598,24 +369,26 @@ with tab_explorer:
     l, v, d = _fmt_metric("solar installs", solar)
     r4[1].metric(l, v, d, delta_color="normal")
     _show_rank(r4[1], "solar_installs", percentiles)
-    biz_per_1k = row.get("businesses_per_1k")
+    biz_per_1k = _biz.get("businesses_per_1k")
     l, v, d = _fmt_metric("businesses per 1k residents", biz_per_1k, "avg_businesses_per_1k", "", 1)
     r4[2].metric(l, v, d, delta_color="normal")
     _show_rank(r4[2], "businesses_per_1k", percentiles)
 
     st.divider()
 
-    # Business categories chart
+    # Business categories chart — data comes from the profile's top_categories
     st.subheader("top business categories")
 
-    if biz_by_zip is not None and not biz_by_zip.empty:
+    top_categories = _biz.get("top_categories", [])
+    if top_categories:
+        biz_by_zip = pd.DataFrame(top_categories)
         selected_cat = st.session_state.explorer_cat
 
-        population = row.get("population")
-        if _valid(population) and float(population) > 0:
-            biz_by_zip = biz_by_zip.copy()
-            biz_by_zip["per_1k"] = (1000.0 * biz_by_zip["active_count"] / float(population)).round(1)
-            bar_text = biz_by_zip.apply(lambda r: f"{int(r['active_count'])}  ({r['per_1k']}/1k)", axis=1)
+        population = _demo.get("population")
+        if _valid(population) and float(population) > 0 and "per_1k" in biz_by_zip.columns:
+            bar_text = biz_by_zip.apply(
+                lambda r: f"{int(r['active_count'])}  ({r['per_1k']}/1k)", axis=1
+            )
         else:
             bar_text = biz_by_zip["active_count"]
 
@@ -712,21 +485,37 @@ with tab_compare:
         st.warning("select a different zip code to compare")
     else:
         profile_b = _load_profile(compare_zip)
-        biz_by_zip_b = _load_biz_by_zip(compare_zip)
 
-        if profile_b.empty:
+        if "error" in profile_b:
             st.warning(f"no data for zip code {compare_zip}")
         else:
-            row_b = profile_b.iloc[0]
+            _demo_b = profile_b.get("demographics", {})
+            _biz_b = profile_b.get("business_landscape", {})
+            _civic_b = profile_b.get("civic_signals", {})
+
             name_a = selected_neighborhood or selected_zip
             name_b = compare_neighborhood or compare_zip
 
-            # Comparison narrative
-            comp_narrative = _build_comparison_narrative(row, row_b, name_a, name_b)
+            # Comparison narrative from the query layer
+            comparison_result = queries.compare_zips(selected_zip, compare_zip)
+            comp_narrative = comparison_result.get("narrative", "")
             st.markdown(f"*{comp_narrative}*")
 
             # Head-to-head metrics table
             st.subheader(f"{name_a} vs {name_b}")
+
+            # Build a flat dict for each zip for metric access
+            def _flat_profile(p):
+                flat = {}
+                for section in ("demographics", "business_landscape", "civic_signals"):
+                    if section in p:
+                        for k, v in p[section].items():
+                            if k != "top_categories":
+                                flat[k] = v
+                return flat
+
+            flat_a = _flat_profile(profile)
+            flat_b = _flat_profile(profile_b)
 
             # (label, key, prefix, decimals, higher_is)
             #   higher_is: "good" = green when higher, "bad" = green when lower, "neutral" = no color
@@ -762,8 +551,8 @@ with tab_compare:
 
             table_rows = []
             for label, key, prefix, decimals, higher_is in compare_metrics:
-                va = row.get(key)
-                vb = row_b.get(key)
+                va = flat_a.get(key)
+                vb = flat_b.get(key)
                 ca, cb = _winner_class(va, vb, higher_is)
                 table_rows.append((label, _fmt_val(va, prefix, decimals), ca,
                                    _fmt_val(vb, prefix, decimals), cb))
@@ -801,12 +590,14 @@ with tab_compare:
             # Category comparison chart
             st.subheader("business categories comparison")
 
-            if (biz_by_zip is not None and not biz_by_zip.empty
-                    and biz_by_zip_b is not None and not biz_by_zip_b.empty):
-                cats_a = biz_by_zip.set_index("category")["active_count"]
-                cats_b = biz_by_zip_b.set_index("category")["active_count"]
+            top_cats_a = _biz.get("top_categories", [])
+            top_cats_b = _biz_b.get("top_categories", [])
+
+            if top_cats_a and top_cats_b:
+                cats_a = {c["category"]: c["active_count"] for c in top_cats_a}
+                cats_b = {c["category"]: c["active_count"] for c in top_cats_b}
                 all_cats = sorted(
-                    set(cats_a.index) | set(cats_b.index),
+                    set(cats_a.keys()) | set(cats_b.keys()),
                     key=lambda c: cats_a.get(c, 0) + cats_b.get(c, 0),
                     reverse=True,
                 )[:15]
