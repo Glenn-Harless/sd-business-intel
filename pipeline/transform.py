@@ -209,11 +209,11 @@ def _build_businesses(con: duckdb.DuckDBPyConnection) -> None:
                 {f'"{naics_col}"' if naics_col else "NULL"},
                 {f'"{desc_col}"' if desc_col else "''"}
             ) AS category,
-            {f'TRY_CAST("{start_col}" AS DATE) AS start_date,' if start_col else "NULL AS start_date,"}
-            {f'TRY_CAST("{create_col}" AS DATE) AS created_date,' if create_col else "NULL AS created_date,"}
-            {f'TRY_CAST("{exp_col}" AS DATE) AS expiration_date,' if exp_col else "NULL AS expiration_date,"}
+            {f"TRY_CAST(STRPTIME(\"{start_col}\", '%m/%d/%Y') AS DATE) AS start_date," if start_col else "NULL AS start_date,"}
+            {f"TRY_CAST(STRPTIME(\"{create_col}\", '%m/%d/%Y') AS DATE) AS created_date," if create_col else "NULL AS created_date,"}
+            {f"TRY_CAST(STRPTIME(\"{exp_col}\", '%m/%d/%Y') AS DATE) AS expiration_date," if exp_col else "NULL AS expiration_date,"}
             CASE
-                WHEN {f'TRY_CAST("{exp_col}" AS DATE) IS NULL OR TRY_CAST("{exp_col}" AS DATE) >= CURRENT_DATE' if exp_col else "TRUE"}
+                WHEN {f"TRY_CAST(STRPTIME(\"{exp_col}\", '%m/%d/%Y') AS DATE) IS NULL OR TRY_CAST(STRPTIME(\"{exp_col}\", '%m/%d/%Y') AS DATE) >= CURRENT_DATE" if exp_col else "TRUE"}
                 THEN 'active' ELSE 'inactive'
             END AS status
         FROM businesses_raw
