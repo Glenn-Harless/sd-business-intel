@@ -81,11 +81,22 @@ def get_filters() -> dict:
             ).fetchdf()["category"].tolist()
         )
 
+    # areas from area_profile
+    areas = []
+    area_path = _AGG / "area_profile.parquet"
+    if area_path.exists():
+        areas = sorted(
+            con.execute(
+                f"SELECT DISTINCT area FROM '{area_path}' ORDER BY area"
+            ).fetchdf()["area"].tolist()
+        )
+
     con.close()
     return {
         "zip_codes": zip_codes,
         "categories": categories,
         "statuses": statuses,
+        "areas": areas,
     }
 
 
@@ -257,6 +268,7 @@ def get_neighborhood_profile(zip_code: str) -> dict:
     return {
         "zip_code": zip_code,
         "neighborhood": row.get("neighborhood"),
+        "area": _clean(row.get("area")),
         "demographics": {
             "population": _clean(row.get("population")),
             "median_age": _clean(row.get("median_age")),
@@ -626,6 +638,230 @@ def compare_zips(zip_a: str, zip_b: str) -> dict:
         "head_to_head": head_to_head,
         "narrative": _build_comparison_narrative(profile_a, profile_b),
     }
+
+
+# ── Area query functions ──
+
+
+def get_areas() -> list[dict]:
+    """Get all areas with summary metrics."""
+    path = _q("data/aggregated/area_profile.parquet")
+    return _run(f"""
+        SELECT
+            area,
+            zip_count,
+            population,
+            active_count,
+            businesses_per_1k,
+            median_income
+        FROM '{path}'
+        ORDER BY population DESC
+    """)
+
+
+def get_area_profile(area: str) -> dict:
+    """Get full area profile with demographics, businesses, civic signals."""
+    ap_path = _q("data/aggregated/area_profile.parquet")
+    row = _run_one(f"SELECT * FROM '{ap_path}' WHERE area = $1", [area])
+    if not row:
+        return {}
+
+    # top categories for area
+    abc_path = _q("data/aggregated/area_business_by_category.parquet")
+    top_cats = _run(f"""
+        SELECT category, active_count, total_count, per_1k
+        FROM '{abc_path}'
+        WHERE area = $1
+        ORDER BY active_count DESC
+        LIMIT 10
+    """, [area])
+
+    # city avg for comparison
+    avg_path = _q("data/aggregated/city_averages.parquet")
+    avg = _run_one(f"SELECT * FROM '{avg_path}'")
+
+    # city avg per-1k for each category (total/total method)
+    bz_path = _q("data/aggregated/business_by_zip.parquet")
+    demo_path = _q("data/processed/demographics.parquet")
+    for cat in top_cats:
+        city_cat = _run_one(f"""
+            SELECT ROUND(1000.0 * SUM(bz.active_count) / NULLIF(
+                (SELECT SUM(population) FROM '{demo_path}'), 0
+            ), 2) AS city_avg_per_1k
+            FROM '{bz_path}' bz
+            WHERE bz.category = $1
+              AND bz.zip_code IN (SELECT zip_code FROM '{demo_path}')
+        """, [cat["category"]])
+        cat["city_avg_per_1k"] = _clean(city_cat.get("city_avg_per_1k")) if city_cat else None
+
+    # comparison to avg
+    comparison = {}
+    compare_fields = [
+        ("population", "avg_population"),
+        ("median_income", "avg_median_income"),
+        ("median_home_value", "avg_median_home_value"),
+        ("median_rent", "avg_median_rent"),
+        ("pct_bachelors_plus", "avg_pct_bachelors_plus"),
+        ("active_count", "avg_active_businesses"),
+        ("businesses_per_1k", "avg_businesses_per_1k"),
+    ]
+    for local_key, avg_key in compare_fields:
+        local_val = row.get(local_key)
+        avg_val = avg.get(avg_key) if avg else None
+        if local_val is not None and avg_val is not None and avg_val != 0:
+            comparison[local_key] = {
+                "value": _clean(local_val),
+                "city_avg": _clean(avg_val),
+                "vs_avg_pct": _clean(round(100 * (local_val - avg_val) / abs(avg_val), 1)),
+            }
+
+    zip_codes = row.get("zip_codes", [])
+
+    return {
+        "area": row.get("area"),
+        "zip_codes": zip_codes if isinstance(zip_codes, list) else [],
+        "zip_count": _clean(row.get("zip_count")),
+        "demographics": {
+            "population": _clean(row.get("population")),
+            "median_age": _clean(row.get("median_age")),
+            "median_income": _clean(row.get("median_income")),
+            "median_home_value": _clean(row.get("median_home_value")),
+            "median_rent": _clean(row.get("median_rent")),
+            "pct_bachelors_plus": _clean(row.get("pct_bachelors_plus")),
+        },
+        "business_landscape": {
+            "active_count": _clean(row.get("active_count")),
+            "total_count": _clean(row.get("total_count")),
+            "businesses_per_1k": _clean(row.get("businesses_per_1k")),
+            "top_categories": [{k: _clean(v) for k, v in c.items()} for c in top_cats],
+        },
+        "civic_signals": {
+            "new_permits": _clean(row.get("new_permits")),
+            "permit_valuation": _clean(row.get("permit_valuation")),
+            "solar_installs": _clean(row.get("solar_installs")),
+            "crime_count": _clean(row.get("crime_count")),
+            "median_311_days": _clean(row.get("median_311_days")),
+            "total_311_requests": _clean(row.get("total_311_requests")),
+        },
+        "comparison_to_avg": comparison,
+        "narrative": "",  # placeholder — narrative function added in Task 7
+    }
+
+
+def compare_areas(area_a: str, area_b: str) -> dict:
+    """Compare two areas head-to-head."""
+    profile_a = get_area_profile(area_a)
+    profile_b = get_area_profile(area_b)
+
+    if not profile_a or not profile_b:
+        return {"error": "One or both areas not found"}
+
+    compare_metrics = [
+        ("population", "demographics"),
+        ("median_income", "demographics"),
+        ("median_home_value", "demographics"),
+        ("median_rent", "demographics"),
+        ("pct_bachelors_plus", "demographics"),
+        ("active_count", "business_landscape"),
+        ("businesses_per_1k", "business_landscape"),
+        ("new_permits", "civic_signals"),
+        ("crime_count", "civic_signals"),
+        ("solar_installs", "civic_signals"),
+        ("median_311_days", "civic_signals"),
+    ]
+
+    head_to_head = {}
+    for metric, section in compare_metrics:
+        val_a = profile_a.get(section, {}).get(metric)
+        val_b = profile_b.get(section, {}).get(metric)
+        diff = None
+        if val_a is not None and val_b is not None:
+            diff = _clean(round(100 * (val_a - val_b) / abs(val_b), 1)) if val_b != 0 else None
+        head_to_head[metric] = {
+            "area_a": _clean(val_a),
+            "area_b": _clean(val_b),
+            "difference": diff,
+        }
+
+    return {
+        "area_a": profile_a,
+        "area_b": profile_b,
+        "head_to_head": head_to_head,
+        "narrative": "",  # placeholder — narrative function added in Task 7
+    }
+
+
+def get_area_rankings(
+    sort_by: str = "population",
+    sort_desc: bool = True,
+    category: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Rank areas by a chosen metric."""
+    ap_path = _q("data/aggregated/area_profile.parquet")
+    direction = "DESC" if sort_desc else "ASC"
+
+    if category:
+        abc_path = _q("data/aggregated/area_business_by_category.parquet")
+        if sort_by == "category_per_1k":
+            order_col = "abc.per_1k"
+        else:
+            order_col = f"ap.{sort_by}"
+        rows = _run(f"""
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY {order_col} {direction} NULLS LAST) AS rank,
+                ap.area,
+                ap.{sort_by} AS sort_value,
+                '{sort_by}' AS sort_metric,
+                abc.active_count AS category_active,
+                abc.per_1k AS category_per_1k,
+                '{category}' AS category,
+                ap.population,
+                ap.median_income,
+                ap.active_count
+            FROM '{ap_path}' ap
+            LEFT JOIN '{abc_path}' abc ON ap.area = abc.area AND abc.category = $1
+            ORDER BY {order_col} {direction} NULLS LAST
+            LIMIT {limit}
+        """, [category])
+    else:
+        rows = _run(f"""
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY {sort_by} {direction} NULLS LAST) AS rank,
+                area,
+                {sort_by} AS sort_value,
+                '{sort_by}' AS sort_metric,
+                NULL AS category,
+                NULL AS category_active,
+                NULL AS category_per_1k,
+                population,
+                median_income,
+                active_count
+            FROM '{ap_path}'
+            ORDER BY {sort_by} {direction} NULLS LAST
+            LIMIT {limit}
+        """)
+
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_area_zips(area: str) -> list[dict]:
+    """Get all zips in an area with key metrics."""
+    np_path = _q("data/aggregated/neighborhood_profile.parquet")
+    return _run(f"""
+        SELECT
+            zip_code,
+            neighborhood,
+            population,
+            active_count,
+            businesses_per_1k,
+            median_income,
+            crime_count,
+            new_permits
+        FROM '{np_path}'
+        WHERE area = $1
+        ORDER BY active_count DESC
+    """, [area])
 
 
 def _clean(val):
