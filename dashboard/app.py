@@ -258,6 +258,9 @@ def _load_rankings(sort_by, sort_desc, category, limit):
     # The query layer returns the sort metric as "sort_value". Rename to
     # the actual metric name so the display code can reference it directly.
     if "sort_value" in df.columns and sort_by != "category_per_1k":
+        # Drop the context column if it matches sort_by to avoid duplicates
+        if sort_by in df.columns:
+            df.drop(columns=[sort_by], inplace=True)
         df.rename(columns={"sort_value": sort_by}, inplace=True)
     # Drop internal columns not needed for display
     for col in ("sort_metric", "rank", "category"):
@@ -275,6 +278,9 @@ def _load_area_rankings(sort_by, sort_desc, category, limit):
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "sort_value" in df.columns and sort_by != "category_per_1k":
+        # Drop the context column if it matches sort_by to avoid duplicates
+        if sort_by in df.columns:
+            df.drop(columns=[sort_by], inplace=True)
         df.rename(columns={"sort_value": sort_by}, inplace=True)
     for col in ("sort_metric", "rank", "category"):
         if col in df.columns:
