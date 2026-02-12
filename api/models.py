@@ -72,6 +72,8 @@ class NeighborhoodProfile(BaseModel):
     comparison_to_avg: dict[str, ComparisonValue] = {}
     percentiles: dict[str, PercentileInfo] = {}
     data_as_of: str | None = None
+    narrative: str = ""
+    area: str | None = None
 
 
 class HeadToHeadMetric(BaseModel):
@@ -113,3 +115,67 @@ class BusinessRecord(BaseModel):
     created_date: str | None = None
     expiration_date: str | None = None
     status: str | None = None
+
+
+class AreaSummary(BaseModel):
+    area: str
+    zip_count: int
+    population: int | None = None
+    active_count: int | None = None
+    businesses_per_1k: float | None = None
+    median_income: int | None = None
+
+
+class AreaProfile(BaseModel):
+    area: str
+    zip_codes: list[str] = []
+    zip_count: int
+    demographics: Demographics
+    business_landscape: BusinessLandscape
+    civic_signals: CivicSignals
+    comparison_to_avg: dict[str, ComparisonValue] = {}
+    narrative: str = ""
+
+
+class AreaComparison(BaseModel):
+    area_a: AreaProfile
+    area_b: AreaProfile
+    head_to_head: dict[str, HeadToHeadMetric] = {}
+    narrative: str = ""
+
+
+class AreaRankingRow(BaseModel):
+    rank: int
+    area: str
+    sort_metric: str
+    sort_value: float | int | None = None
+    category: str | None = None
+    category_active: int | None = None
+    category_per_1k: float | None = None
+    population: int | None = None
+    median_income: int | None = None
+    active_count: int | None = None
+
+
+class TrendPoint(BaseModel):
+    year: int
+    count: int | None = None
+    yoy_pct: float | None = None
+
+
+class TrendSeries(BaseModel):
+    business_formation: list[TrendPoint] = []
+    permits: list[TrendPoint] = []
+    crime: list[TrendPoint] = []
+    solar: list[TrendPoint] = []
+
+
+class AreaZipSummary(BaseModel):
+    zip_code: str
+    neighborhood: str | None = None
+    population: int | None = None
+    active_count: int | None = None
+    businesses_per_1k: float | None = None
+    median_income: int | None = None
+    crime_count: int | None = None
+    new_permits: int | None = None
