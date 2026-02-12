@@ -469,6 +469,9 @@ def _build_aggregates(con: duckdb.DuckDBPyConnection) -> None:
     """)
     print("  [done] zip_to_neighborhood.parquet")
 
+    # 8. trend parquets
+    _build_trends(con)
+
 
 def _build_neighborhood_profile(
     con: duckdb.DuckDBPyConnection, has_biz: bool, has_demo: bool
@@ -685,6 +688,55 @@ def _build_area_profiles(
             ) TO '{AGG_DIR}/area_business_by_category.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
         """)
         print("  [done] area_business_by_category.parquet")
+
+
+def _build_trends(con: duckdb.DuckDBPyConnection) -> None:
+    """Build trend parquets for temporal analysis."""
+    # 1. trend_business_formation — new businesses per zip per year
+    biz_path = PROCESSED_DIR / "businesses.parquet"
+    if biz_path.exists():
+        con.execute(f"""
+            COPY (
+                SELECT
+                    zip_code,
+                    EXTRACT(YEAR FROM start_date)::INTEGER AS year,
+                    COUNT(*) AS new_businesses
+                FROM '{biz_path}'
+                WHERE start_date IS NOT NULL
+                  AND EXTRACT(YEAR FROM start_date) >= 2015
+                GROUP BY zip_code, EXTRACT(YEAR FROM start_date)
+                ORDER BY zip_code, year
+            ) TO '{AGG_DIR}/trend_business_formation.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """)
+        count = con.execute(f"""
+            SELECT COUNT(*) FROM '{AGG_DIR}/trend_business_formation.parquet'
+        """).fetchone()[0]
+        print(f"  [done] trend_business_formation.parquet -> {count:,} rows")
+    else:
+        print("  [skip] trend_business_formation.parquet (no businesses)")
+
+    # 2. trend_311_monthly — extract year/month from DATE column
+    monthly_path = AGG_DIR / "civic_311_monthly.parquet"
+    if monthly_path.exists():
+        con.execute(f"""
+            COPY (
+                SELECT
+                    EXTRACT(YEAR FROM request_month_start)::INTEGER AS year,
+                    EXTRACT(MONTH FROM request_month_start)::INTEGER AS month,
+                    total_requests,
+                    closed_requests,
+                    avg_resolution_days,
+                    median_resolution_days
+                FROM '{monthly_path}'
+                ORDER BY year, month
+            ) TO '{AGG_DIR}/trend_311_monthly.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """)
+        count = con.execute(f"""
+            SELECT COUNT(*) FROM '{AGG_DIR}/trend_311_monthly.parquet'
+        """).fetchone()[0]
+        print(f"  [done] trend_311_monthly.parquet -> {count:,} rows")
+    else:
+        print("  [skip] trend_311_monthly.parquet (no 311 monthly data)")
 
 
 def _build_city_averages(
