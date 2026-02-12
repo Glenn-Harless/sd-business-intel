@@ -133,6 +133,116 @@ ZIP_TO_COMM_PLAN: dict[str, str] = {
     "92173": "San Ysidro",
 }
 
+# zip → area mapping for area-level aggregation (only profiled zips)
+ZIP_TO_AREA: dict[str, str] = {
+    # Downtown
+    "92101": "Downtown",
+    # Uptown / North Park
+    "92103": "Uptown / North Park",
+    "92104": "Uptown / North Park",
+    "92116": "Uptown / North Park",
+    # Golden Hill / City Heights
+    "92102": "Golden Hill / City Heights",
+    "92105": "Golden Hill / City Heights",
+    # Barrio Logan / Logan Heights
+    "92113": "Barrio Logan / Logan Heights",
+    # Pacific Beach
+    "92109": "Pacific Beach",
+    # Ocean Beach / Point Loma
+    "92106": "Ocean Beach / Point Loma",
+    "92107": "Ocean Beach / Point Loma",
+    # Mission Valley / Linda Vista
+    "92108": "Mission Valley / Linda Vista",
+    "92110": "Mission Valley / Linda Vista",
+    "92111": "Mission Valley / Linda Vista",
+    # Clairemont
+    "92117": "Clairemont",
+    # La Jolla / University City
+    "92037": "La Jolla / University City",
+    "92122": "La Jolla / University City",
+    # Sorrento Valley / Mira Mesa
+    "92121": "Sorrento Valley / Mira Mesa",
+    "92126": "Sorrento Valley / Mira Mesa",
+    # Rancho Bernardo / Scripps Ranch
+    "92127": "Rancho Bernardo / Scripps Ranch",
+    "92128": "Rancho Bernardo / Scripps Ranch",
+    "92131": "Rancho Bernardo / Scripps Ranch",
+    # Carmel Valley / Rancho Penasquitos
+    "92129": "Carmel Valley / Rancho Penasquitos",
+    "92130": "Carmel Valley / Rancho Penasquitos",
+    # Carlsbad
+    "92008": "Carlsbad",
+    "92009": "Carlsbad",
+    "92010": "Carlsbad",
+    "92011": "Carlsbad",
+    # Oceanside
+    "92054": "Oceanside",
+    "92056": "Oceanside",
+    "92057": "Oceanside",
+    "92058": "Oceanside",
+    # Encinitas / Del Mar / Solana Beach
+    "92007": "Encinitas / Del Mar / Solana Beach",
+    "92014": "Encinitas / Del Mar / Solana Beach",
+    "92024": "Encinitas / Del Mar / Solana Beach",
+    "92075": "Encinitas / Del Mar / Solana Beach",
+    # Escondido
+    "92025": "Escondido",
+    "92026": "Escondido",
+    "92027": "Escondido",
+    "92029": "Escondido",
+    # Vista / San Marcos
+    "92069": "Vista / San Marcos",
+    "92078": "Vista / San Marcos",
+    "92081": "Vista / San Marcos",
+    "92083": "Vista / San Marcos",
+    "92084": "Vista / San Marcos",
+    # Chula Vista / National City
+    "91910": "Chula Vista / National City",
+    "91911": "Chula Vista / National City",
+    "91913": "Chula Vista / National City",
+    "91914": "Chula Vista / National City",
+    "91915": "Chula Vista / National City",
+    "91950": "Chula Vista / National City",
+    # La Mesa / Lemon Grove
+    "91941": "La Mesa / Lemon Grove",
+    "91942": "La Mesa / Lemon Grove",
+    "91945": "La Mesa / Lemon Grove",
+    # El Cajon
+    "92019": "El Cajon",
+    "92020": "El Cajon",
+    "92021": "El Cajon",
+    # South Bay / San Ysidro
+    "92154": "South Bay / San Ysidro",
+    "92173": "South Bay / San Ysidro",
+    "91932": "South Bay / San Ysidro",
+    "92139": "South Bay / San Ysidro",
+    # East County
+    "91901": "East County",
+    "91977": "East County",
+    "91978": "East County",
+    "92040": "East County",
+    "92065": "East County",
+    "92071": "East County",
+    # Poway / Rancho Santa Fe
+    "92064": "Poway / Rancho Santa Fe",
+    "92067": "Poway / Rancho Santa Fe",
+    "92091": "Poway / Rancho Santa Fe",
+    # Unmapped profiled zips (will default to "Other" at runtime):
+    # 91902 — Bonita
+    # 92028 — Fallbrook
+    # 92114 — Encanto / Lomita
+    # 92115 — College Area
+    # 92118 — Coronado
+    # 92119 — San Carlos
+    # 92120 — Del Cerro / Allied Gardens
+    # 92123 — Serra Mesa / Kearny Mesa
+    # 92124 — Tierrasanta
+    # 92132 — Naval Base
+    # 92134 — Naval Base
+    # 92140 — Naval Base
+    # 92145 — Miramar
+}
+
 
 def _register_naics_udf(con: duckdb.DuckDBPyConnection) -> None:
     """Register map_naics as a scalar UDF in DuckDB."""
