@@ -16,6 +16,7 @@ CIVIC_SOURCES: dict[str, str] = {
     "sd-climate-action/data/aggregated/solar_by_zip.parquet": "civic_solar.parquet",
     "sd-public-safety/data/aggregated/crime_by_zip.parquet": "civic_crime.parquet",
     "sd-get-it-done/data/aggregated/response_by_neighborhood.parquet": "civic_311.parquet",
+    "sd-get-it-done/data/aggregated/monthly_trends.parquet": "civic_311_monthly.parquet",
     "sd-homelessness/data/aggregated/pit_geography.parquet": "civic_homelessness.parquet",
 }
 
