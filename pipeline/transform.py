@@ -456,7 +456,10 @@ def _build_aggregates(con: duckdb.DuckDBPyConnection) -> None:
     # 5. city_averages — city-wide averages for comparison
     _build_city_averages(con, has_biz, has_demo)
 
-    # 6. zip_to_neighborhood — mapping table
+    # 6. area profiles — area-level aggregation
+    _build_area_profiles(con, has_biz, has_demo)
+
+    # 7. zip_to_neighborhood — mapping table
     rows = [(z, n) for z, n in ZIP_TO_NEIGHBORHOOD.items()]
     con.execute("CREATE OR REPLACE TABLE zip_neighborhood(zip_code VARCHAR, neighborhood VARCHAR)")
     con.executemany("INSERT INTO zip_neighborhood VALUES (?, ?)", rows)
@@ -479,6 +482,13 @@ def _build_neighborhood_profile(
     # build the profile from whatever data we have
     select_parts = ["zn.zip_code", "zn.neighborhood"]
     from_parts = ["zn"]
+
+    # area mapping
+    area_rows = [(z, a) for z, a in ZIP_TO_AREA.items()]
+    con.execute("CREATE OR REPLACE TABLE za_lookup(zip_code VARCHAR, area VARCHAR)")
+    con.executemany("INSERT INTO za_lookup VALUES (?, ?)", area_rows)
+    select_parts.append("COALESCE(za_lookup.area, 'Other') AS area")
+    from_parts.append("LEFT JOIN za_lookup ON zn.zip_code = za_lookup.zip_code")
 
     if has_biz:
         select_parts.extend([
@@ -602,6 +612,79 @@ def _build_neighborhood_profile(
     """
     con.execute(sql)
     print("  [done] neighborhood_profile.parquet")
+
+
+def _build_area_profiles(
+    con: duckdb.DuckDBPyConnection, has_biz: bool, has_demo: bool
+) -> None:
+    """Build area_profile.parquet and area_business_by_category.parquet."""
+    np_path = AGG_DIR / "neighborhood_profile.parquet"
+    if not np_path.exists():
+        print("  [skip] area parquets (no neighborhood_profile)")
+        return
+
+    # Load ZIP_TO_AREA into a temp table
+    rows = [(z, a) for z, a in ZIP_TO_AREA.items()]
+    con.execute("CREATE OR REPLACE TABLE zip_area(zip_code VARCHAR, area VARCHAR)")
+    con.executemany("INSERT INTO zip_area VALUES (?, ?)", rows)
+
+    # Handle unmapped profiled zips → "Other"
+    con.execute(f"""
+        INSERT INTO zip_area
+        SELECT np.zip_code, 'Other'
+        FROM '{np_path}' np
+        WHERE np.zip_code NOT IN (SELECT zip_code FROM zip_area)
+    """)
+
+    # 1. area_profile.parquet
+    con.execute(f"""
+        COPY (
+            SELECT
+                za.area,
+                LIST(DISTINCT za.zip_code ORDER BY za.zip_code) AS zip_codes,
+                COUNT(DISTINCT za.zip_code) AS zip_count,
+                SUM(np.population) AS population,
+                ROUND(SUM(CAST(np.median_age AS DOUBLE) * np.population) / NULLIF(SUM(np.population), 0), 1) AS median_age,
+                ROUND(SUM(CAST(np.median_income AS BIGINT) * np.population) / NULLIF(SUM(np.population), 0), 0) AS median_income,
+                ROUND(SUM(CAST(np.median_home_value AS BIGINT) * np.population) / NULLIF(SUM(np.population), 0), 0) AS median_home_value,
+                ROUND(SUM(CAST(np.median_rent AS BIGINT) * np.population) / NULLIF(SUM(np.population), 0), 0) AS median_rent,
+                ROUND(SUM(CAST(np.pct_bachelors_plus AS DOUBLE) * np.population) / NULLIF(SUM(np.population), 0), 1) AS pct_bachelors_plus,
+                SUM(np.active_count) AS active_count,
+                SUM(np.total_count) AS total_count,
+                ROUND(1000.0 * SUM(np.active_count) / NULLIF(SUM(np.population), 0), 1) AS businesses_per_1k,
+                SUM(np.new_permits) AS new_permits,
+                SUM(np.permit_valuation) AS permit_valuation,
+                SUM(np.solar_installs) AS solar_installs,
+                SUM(np.crime_count) AS crime_count,
+                ROUND(SUM(np.median_311_days * np.total_311_requests) / NULLIF(SUM(np.total_311_requests), 0), 1) AS median_311_days,
+                SUM(np.total_311_requests) AS total_311_requests
+            FROM zip_area za
+            JOIN '{np_path}' np ON za.zip_code = np.zip_code
+            GROUP BY za.area
+            ORDER BY SUM(np.population) DESC
+        ) TO '{AGG_DIR}/area_profile.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
+    print("  [done] area_profile.parquet")
+
+    # 2. area_business_by_category.parquet
+    biz_by_zip_path = AGG_DIR / "business_by_zip.parquet"
+    if biz_by_zip_path.exists():
+        con.execute(f"""
+            COPY (
+                SELECT
+                    za.area,
+                    bz.category,
+                    SUM(bz.active_count) AS active_count,
+                    SUM(bz.total_count) AS total_count,
+                    ROUND(1000.0 * SUM(bz.active_count) / NULLIF(ap.population, 0), 2) AS per_1k
+                FROM zip_area za
+                JOIN '{biz_by_zip_path}' bz ON za.zip_code = bz.zip_code
+                JOIN '{AGG_DIR}/area_profile.parquet' ap ON za.area = ap.area
+                GROUP BY za.area, bz.category, ap.population
+                ORDER BY za.area, SUM(bz.active_count) DESC
+            ) TO '{AGG_DIR}/area_business_by_category.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """)
+        print("  [done] area_business_by_category.parquet")
 
 
 def _build_city_averages(
