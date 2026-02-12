@@ -497,6 +497,125 @@ def _build_comparison_narrative(profile_a: dict, profile_b: dict) -> str:
     return " — ".join(parts)
 
 
+def _build_area_narrative(row: dict, avg: dict) -> str:
+    """Generate a one-sentence narrative comparing an area to city averages."""
+    if not avg:
+        return ""
+
+    area = row.get("area", "this area")
+    zip_count = row.get("zip_count", 0)
+    pop = row.get("population")
+    pop_str = f"pop {pop:,.0f}" if pop else ""
+
+    metrics = [
+        ("active_count", "avg_active_businesses", "businesses", "good", "fewer"),
+        ("businesses_per_1k", "avg_businesses_per_1k", "businesses per 1k residents", "good", "fewer"),
+        ("median_income", "avg_median_income", "median income", "good", "lower"),
+        ("median_rent", "avg_median_rent", "median rent", "bad", "lower"),
+        ("median_home_value", "avg_median_home_value", "home values", "bad", "lower"),
+        ("crime_count", "avg_crime_count", "crime incidents", "bad", "fewer"),
+        ("new_permits", "avg_new_permits", "new permits", "good", "fewer"),
+        ("solar_installs", "avg_solar_installs", "solar installs", "good", "fewer"),
+        ("pct_bachelors_plus", "avg_pct_bachelors_plus", "college-educated residents", "good", "fewer"),
+    ]
+
+    scored = []
+    for row_key, avg_key, label, higher_is, less_word in metrics:
+        local = row.get(row_key)
+        city = avg.get(avg_key)
+        if local is None or city is None or city == 0:
+            continue
+        ratio = local / city
+        if 0.9 <= ratio <= 1.1:
+            continue
+        magnitude = abs(ratio - 1)
+        is_higher = ratio > 1
+        if ratio > 10 or (ratio > 0 and ratio < 0.1):
+            mag_str = f"{ratio:.0f}x" if is_higher else f"1/{1/ratio:.0f}th the"
+        elif ratio >= 2:
+            mag_str = f"{ratio:.1f}x"
+        elif ratio <= 0.5:
+            mag_str = f"{100*(1-ratio):.0f}% {less_word}"
+        elif is_higher:
+            mag_str = f"{100*(ratio-1):.0f}% more"
+        else:
+            mag_str = f"{100*(1-ratio):.0f}% {less_word}"
+        is_positive = (is_higher and higher_is == "good") or (not is_higher and higher_is == "bad")
+        scored.append((magnitude, is_positive, f"{mag_str} {label}"))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5]
+    positives = [s[2] for s in top if s[1]]
+    negatives = [s[2] for s in top if not s[1]]
+
+    prefix = f"{area.lower()} ({zip_count} zip codes, {pop_str})" if pop_str else f"{area.lower()} ({zip_count} zip codes)"
+
+    if not positives and not negatives:
+        return f"{prefix} is close to city average across most metrics."
+
+    parts = []
+    if positives:
+        parts.append(", ".join(positives))
+    if negatives:
+        neg_str = ", ".join(negatives)
+        parts.append(f"but {neg_str}" if positives else neg_str)
+
+    joined = " — ".join(parts)
+    return f"compared to the avg sd area: {prefix} has {joined}."
+
+
+def _build_area_comparison_narrative(profile_a: dict, profile_b: dict) -> str:
+    """Generate a comparison narrative for two areas."""
+    name_a = profile_a.get("area", "area a")
+    name_b = profile_b.get("area", "area b")
+
+    metrics = [
+        ("population", "demographics", "population", "neutral"),
+        ("median_income", "demographics", "median income", "good"),
+        ("businesses_per_1k", "business_landscape", "businesses per capita", "good"),
+        ("active_count", "business_landscape", "total businesses", "good"),
+        ("crime_count", "civic_signals", "crime incidents", "bad"),
+        ("new_permits", "civic_signals", "new permits", "good"),
+        ("median_311_days", "civic_signals", "311 response time", "bad"),
+    ]
+
+    a_wins = []
+    b_wins = []
+    for metric, section, label, higher_is in metrics:
+        val_a = profile_a.get(section, {}).get(metric)
+        val_b = profile_b.get(section, {}).get(metric)
+        if val_a is None or val_b is None or val_b == 0:
+            continue
+        ratio = val_a / val_b
+        if 0.9 <= ratio <= 1.1:
+            continue
+        pct = abs(ratio - 1) * 100
+        desc = f"{pct:.0f}% {'more' if ratio > 1 else 'fewer'} {label}"
+        if higher_is == "neutral":
+            continue
+        a_better = (ratio > 1 and higher_is == "good") or (ratio < 1 and higher_is == "bad")
+        if a_better:
+            a_wins.append((pct, desc))
+        else:
+            b_wins.append((pct, desc))
+
+    a_wins.sort(reverse=True)
+    b_wins.sort(reverse=True)
+    a_top = [w[1] for w in a_wins[:3]]
+    b_top = [w[1] for w in b_wins[:3]]
+
+    if not a_top and not b_top:
+        return f"{name_a.lower()} and {name_b.lower()} are similar across most metrics."
+
+    parts = []
+    if a_top:
+        parts.append(f"{name_a.lower()} has {', '.join(a_top)}")
+    if b_top:
+        parts.append(f"{name_b.lower()} has {', '.join(b_top)}")
+
+    return " — ".join(parts) + "."
+
+
 _RANKING_METRICS = frozenset({
     "population", "median_income", "median_age", "median_rent",
     "median_home_value", "pct_bachelors_plus", "active_count",
@@ -744,7 +863,7 @@ def get_area_profile(area: str) -> dict:
             "total_311_requests": _clean(row.get("total_311_requests")),
         },
         "comparison_to_avg": comparison,
-        "narrative": "",  # placeholder — narrative function added in Task 7
+        "narrative": _build_area_narrative(row, avg),
     }
 
 
@@ -787,7 +906,7 @@ def compare_areas(area_a: str, area_b: str) -> dict:
         "area_a": profile_a,
         "area_b": profile_b,
         "head_to_head": head_to_head,
-        "narrative": "",  # placeholder — narrative function added in Task 7
+        "narrative": _build_area_comparison_narrative(profile_a, profile_b),
     }
 
 
@@ -864,6 +983,121 @@ def get_area_zips(area: str) -> list[dict]:
     """, [area])
 
 
+# ── Trend query functions ──
+
+
+def get_zip_trends(zip_code: str) -> dict:
+    """Get year-over-year trend data for a zip."""
+    trends = {}
+
+    # Business formation
+    tbf_path = _AGG / "trend_business_formation.parquet"
+    if tbf_path.exists():
+        rows = _run(f"""
+            SELECT year, new_businesses AS count
+            FROM '{tbf_path}'
+            WHERE zip_code = $1
+            ORDER BY year
+        """, [zip_code])
+        _add_yoy(rows)
+        trends["business_formation"] = rows
+
+    # Permits
+    cp_path = _AGG / "civic_permits.parquet"
+    if cp_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(permit_count) AS count
+            FROM '{cp_path}'
+            WHERE zip_code = $1
+            GROUP BY year ORDER BY year
+        """, [zip_code])
+        _add_yoy(rows)
+        trends["permits"] = rows
+
+    # Crime
+    cc_path = _AGG / "civic_crime.parquet"
+    if cc_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(count) AS count
+            FROM '{cc_path}'
+            WHERE zip_code = $1
+            GROUP BY year ORDER BY year
+        """, [zip_code])
+        _add_yoy(rows)
+        trends["crime"] = rows
+
+    # Solar
+    cs_path = _AGG / "civic_solar.parquet"
+    if cs_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(solar_count) AS count
+            FROM '{cs_path}'
+            WHERE zip_code = $1
+            GROUP BY year ORDER BY year
+        """, [zip_code])
+        _add_yoy(rows)
+        trends["solar"] = rows
+
+    return trends
+
+
+def get_area_trends(area: str) -> dict:
+    """Get year-over-year trend data aggregated across an area's zips."""
+    from pipeline.transform import ZIP_TO_AREA
+    zips = [z for z, a in ZIP_TO_AREA.items() if a == area]
+    if not zips:
+        return {}
+
+    placeholders = ", ".join(f"'{z}'" for z in zips)
+    trends = {}
+
+    tbf_path = _AGG / "trend_business_formation.parquet"
+    if tbf_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(new_businesses) AS count
+            FROM '{tbf_path}'
+            WHERE zip_code IN ({placeholders})
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["business_formation"] = rows
+
+    cp_path = _AGG / "civic_permits.parquet"
+    if cp_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(permit_count) AS count
+            FROM '{cp_path}'
+            WHERE zip_code IN ({placeholders})
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["permits"] = rows
+
+    cc_path = _AGG / "civic_crime.parquet"
+    if cc_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(count) AS count
+            FROM '{cc_path}'
+            WHERE zip_code IN ({placeholders})
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["crime"] = rows
+
+    cs_path = _AGG / "civic_solar.parquet"
+    if cs_path.exists():
+        rows = _run(f"""
+            SELECT year, SUM(solar_count) AS count
+            FROM '{cs_path}'
+            WHERE zip_code IN ({placeholders})
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["solar"] = rows
+
+    return trends
+
+
 def _clean(val):
     """Convert numpy/pandas types to native Python, handle NaN."""
     if val is None:
@@ -879,3 +1113,16 @@ def _clean(val):
             return int(val)
         return round(float(val), 1)
     return val
+
+
+def _add_yoy(rows: list[dict]) -> None:
+    """Add yoy_pct to each row (in-place)."""
+    for i, row in enumerate(rows):
+        if i == 0 or rows[i - 1]["count"] is None or rows[i - 1]["count"] == 0:
+            row["yoy_pct"] = None
+        else:
+            row["yoy_pct"] = _clean(
+                round(100 * (row["count"] - rows[i - 1]["count"]) / abs(rows[i - 1]["count"]), 1)
+            )
+        row["count"] = _clean(row["count"])
+        row["year"] = _clean(row["year"])
