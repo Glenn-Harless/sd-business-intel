@@ -219,6 +219,16 @@ def _category_options():
     return filters.get("categories", [])
 
 
+@st.cache_data(ttl=3600)
+def _load_trends(zip_code: str | None = None, area: str | None = None) -> dict:
+    """Load YoY trend data for a zip code or area."""
+    if zip_code:
+        return queries.get_zip_trends(zip_code)
+    elif area:
+        return queries.get_area_trends(area)
+    return {}
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -336,6 +346,18 @@ def _show_rank(col, metric_key, percentiles):
     else:
         text = f"rank {rank} of {of}"
     col.caption(text)
+
+
+def _latest_yoy(trends: dict, series_name: str) -> str | None:
+    """Get the latest YoY percentage from a trend series, formatted for st.metric delta."""
+    series = trends.get(series_name, [])
+    if not series:
+        return None
+    latest = series[-1]
+    yoy = latest.get("yoy_pct")
+    if yoy is None:
+        return None
+    return f"{yoy:+.0f}% yoy"
 
 
 def _flat_profile(p):
@@ -509,6 +531,9 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
 
     Shared by both zip-mode and area-drilldown-mode to avoid duplication.
     """
+    # Load YoY trend data for civic signal deltas
+    trends = _load_trends(zip_code=zip_code)
+
     pop = _demo.get("population")
     income = _demo.get("median_income")
     active_biz = _biz.get("active_count")
@@ -549,19 +574,19 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
     solar = _civic.get("solar_installs")
     median_311 = _civic.get("median_311_days")
 
-    l, v, d = _fmt_metric("crime count", crime)
-    r3[1].metric(l, v, d, delta_color="inverse")
+    l, v, _ = _fmt_metric("crime count", crime)
+    r3[1].metric(l, v, _latest_yoy(trends, "crime"), delta_color="inverse")
     _show_rank(r3[1], "crime_count", percentiles)
     l, v, d = _fmt_metric("311 median days", median_311, decimals=1)
     r3[2].metric(l, v, d, delta_color="inverse")
     _show_rank(r3[2], "median_311_days", percentiles)
 
     r4 = st.columns(3)
-    l, v, d = _fmt_metric("new permits", permits)
-    r4[0].metric(l, v, d, delta_color="normal")
+    l, v, _ = _fmt_metric("new permits", permits)
+    r4[0].metric(l, v, _latest_yoy(trends, "permits"), delta_color="normal")
     _show_rank(r4[0], "new_permits", percentiles)
-    l, v, d = _fmt_metric("solar installs", solar)
-    r4[1].metric(l, v, d, delta_color="normal")
+    l, v, _ = _fmt_metric("solar installs", solar)
+    r4[1].metric(l, v, _latest_yoy(trends, "solar"), delta_color="normal")
     _show_rank(r4[1], "solar_installs", percentiles)
     biz_per_1k = _biz.get("businesses_per_1k")
     l, v, d = _fmt_metric("businesses per 1k residents", biz_per_1k, "avg_businesses_per_1k", "", 1)
@@ -695,6 +720,9 @@ with tab_explorer:
             _a_biz = area_profile.get("business_landscape", {})
             _a_civic = area_profile.get("civic_signals", {})
 
+            # Load YoY trend data for civic signal deltas
+            area_trends = _load_trends(area=selected_area)
+
             # Summary metric cards
             r1 = st.columns(4)
             pop = _a_demo.get("population")
@@ -718,11 +746,11 @@ with tab_explorer:
             l, v, d = _fmt_metric("median home value", home_val, "avg_median_home_value", "$")
             r2[1].metric(l, v, d, delta_color="off")
             crime = _a_civic.get("crime_count")
-            l, v, d = _fmt_metric("crime count", crime)
-            r2[2].metric(l, v, d, delta_color="inverse")
+            l, v, _ = _fmt_metric("crime count", crime)
+            r2[2].metric(l, v, _latest_yoy(area_trends, "crime"), delta_color="inverse")
             permits = _a_civic.get("new_permits")
-            l, v, d = _fmt_metric("new permits", permits)
-            r2[3].metric(l, v, d, delta_color="normal")
+            l, v, _ = _fmt_metric("new permits", permits)
+            r2[3].metric(l, v, _latest_yoy(area_trends, "permits"), delta_color="normal")
 
             st.divider()
 
