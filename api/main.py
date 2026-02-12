@@ -7,11 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import queries
 from api.models import (
+    AreaRankingRow,
+    AreaSummary,
+    AreaZipSummary,
     BusinessRecord,
     FilterOptions,
     HealthResponse,
     NeighborhoodProfile,
     RankingRow,
+    TrendSeries,
 )
 
 app = FastAPI(
@@ -90,3 +94,59 @@ def businesses(
 ):
     """Individual business records, filterable by zip, category, status."""
     return queries.get_businesses(zip, category, status, limit)
+
+
+@app.get("/areas", response_model=list[AreaSummary])
+def areas():
+    """List all San Diego areas with summary stats."""
+    return queries.get_areas()
+
+
+@app.get("/area-profile")
+def area_profile(area: str = Query(..., description="Area name")):
+    """Full area profile: aggregated demographics, business counts, civic signals across member zips."""
+    result = queries.get_area_profile(area)
+    if not result:
+        raise HTTPException(404, f"Area '{area}' not found")
+    return result
+
+
+@app.get("/compare-areas")
+def compare_areas_endpoint(
+    area_a: str = Query(..., description="First area"),
+    area_b: str = Query(..., description="Second area"),
+):
+    """Compare two areas head-to-head: demographics, business landscape, civic signals."""
+    result = queries.compare_areas(area_a, area_b)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.get("/area-rankings", response_model=list[AreaRankingRow])
+def area_rankings(
+    sort_by: str = "population",
+    sort_desc: bool = True,
+    category: str | None = None,
+    limit: int = 20,
+):
+    """Rank areas by a chosen metric, optionally by category density per 1k residents."""
+    return queries.get_area_rankings(sort_by, sort_desc, category, limit)
+
+
+@app.get("/area-zips", response_model=list[AreaZipSummary])
+def area_zips(area: str = Query(..., description="Area name")):
+    """List individual zip codes within an area with their key metrics."""
+    return queries.get_area_zips(area)
+
+
+@app.get("/zip-trends")
+def zip_trends(zip: str = Query(..., description="Zip code")):
+    """Year-over-year trend data for a single zip: business formation, permits, crime, solar."""
+    return queries.get_zip_trends(zip)
+
+
+@app.get("/area-trends")
+def area_trends(area: str = Query(..., description="Area name")):
+    """Year-over-year trend data for an area: business formation, permits, crime, solar."""
+    return queries.get_area_trends(area)
