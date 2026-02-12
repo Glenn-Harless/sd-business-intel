@@ -1,6 +1,6 @@
 """MCP server for SD Business Intel.
 
-Exposes 4 tools that let Claude query business intelligence parquets directly.
+Exposes 13 tools that let Claude query business intelligence parquets directly.
 Uses FastMCP (v2) with stdio transport — spawned by Claude Code as a subprocess.
 """
 
@@ -89,6 +89,73 @@ def compare_zips(zip_a: str, zip_b: str) -> dict:
     showing differences in demographics, business landscape, and civic signals.
     """
     return queries.compare_zips(zip_a, zip_b)
+
+
+@mcp.tool()
+def get_areas() -> list[dict]:
+    """List all San Diego areas with summary metrics.
+
+    Returns area names, zip counts, population, business counts, and income.
+    Use this to see what areas are available for deeper analysis."""
+    return queries.get_areas()
+
+
+@mcp.tool()
+def get_area_profile(area: str) -> dict:
+    """Get full area profile for a San Diego area.
+
+    Returns demographics, business landscape, civic signals, comparison
+    to city averages, and a narrative summary. Areas group nearby zip codes."""
+    return queries.get_area_profile(area)
+
+
+@mcp.tool()
+def compare_areas(area_a: str, area_b: str) -> dict:
+    """Compare two San Diego areas head-to-head.
+
+    Returns both area profiles plus a comparison showing differences
+    in demographics, business landscape, and civic signals."""
+    return queries.compare_areas(area_a, area_b)
+
+
+@mcp.tool()
+def get_area_rankings(
+    sort_by: str = "population",
+    sort_desc: bool = True,
+    category: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Rank San Diego areas by a chosen metric.
+
+    Sort by demographics, business metrics, or civic signals.
+    Optionally filter by business category for category-specific density."""
+    return queries.get_area_rankings(sort_by, sort_desc, category, limit)
+
+
+@mcp.tool()
+def get_area_zips(area: str) -> list[dict]:
+    """Get all zip codes within a San Diego area with key metrics.
+
+    Enables drill-down from area-level to zip-level analysis."""
+    return queries.get_area_zips(area)
+
+
+@mcp.tool()
+def get_zip_trends(zip_code: str) -> dict:
+    """Get year-over-year trend data for a San Diego zip code.
+
+    Returns time-series data for business formation, permits, crime,
+    and solar with YoY change percentages."""
+    return queries.get_zip_trends(zip_code)
+
+
+@mcp.tool()
+def get_area_trends(area: str) -> dict:
+    """Get year-over-year trend data for a San Diego area.
+
+    Returns aggregated time-series across the area's zip codes
+    for business formation, permits, crime, and solar."""
+    return queries.get_area_trends(area)
 
 
 def main():
