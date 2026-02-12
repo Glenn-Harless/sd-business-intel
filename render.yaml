@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: sd-business-intel-api
+    runtime: python
+    buildCommand: pip install -r requirements-api.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT

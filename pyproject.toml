@@ -1,0 +1,26 @@
+[project]
+name = "sd-business-intel"
+version = "0.1.0"
+description = "San Diego small business intelligence — location analytics for entrepreneurs"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1",
+    "httpx>=0.27",
+    "pyarrow>=17.0",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.0",
+    "fastmcp>=2.0",
+    "streamlit>=1.40",
+    "plotly>=5.18",
+    "pydeck>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pipeline", "api", "dashboard"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

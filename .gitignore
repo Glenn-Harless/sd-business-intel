@@ -1,0 +1,10 @@
+data/raw/
+data/processed/
+data/aggregated/*
+!data/aggregated/*.parquet
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+.env
