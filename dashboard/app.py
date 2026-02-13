@@ -234,6 +234,16 @@ def _load_311_services():
     return queries.get_311_services()
 
 
+@st.cache_data(ttl=3600)
+def _load_map_layer(layer: str, zip_code: str | None = None,
+                     year_min: int | None = None, year_max: int | None = None):
+    """Load map points for a layer, filtered by location and time."""
+    rows = queries.get_map_points(layer, zip_code, year_min, year_max, limit=80000)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -372,6 +382,146 @@ def _latest_yoy(trends: dict, series_name: str) -> str | None:
     return f"{yoy:+.0f}% yoy"
 
 
+def _render_map(zip_code: str | None = None, area: str | None = None,
+                key_prefix: str = "map"):
+    """Render multi-layer interactive map for a zip code or area.
+
+    Area mode: centers on average of constituent zip centroids, zoom 11.
+    Zip mode: centers on zip centroid, zoom 13.
+    """
+    # Determine center and zoom
+    if area and not zip_code:
+        # Area mode: average constituent zip centroids
+        area_zips_data = queries.get_area_zips(area)
+        area_zip_codes = [z["zip_code"] for z in area_zips_data] if area_zips_data else []
+        lats, lngs = [], []
+        for zc in area_zip_codes:
+            if zc in ZIP_COORDS:
+                lat, lng = ZIP_COORDS[zc]
+                lats.append(lat)
+                lngs.append(lng)
+        if lats:
+            center_lat = sum(lats) / len(lats)
+            center_lng = sum(lngs) / len(lngs)
+        else:
+            center_lat, center_lng = 32.7157, -117.1611
+        zoom = 11
+        # Use first constituent zip for spatial filtering (wider bbox in query)
+        filter_zip = area_zip_codes[0] if area_zip_codes else None
+    else:
+        center_lat, center_lng = ZIP_COORDS.get(zip_code, (32.7157, -117.1611))
+        zoom = 13
+        filter_zip = zip_code
+
+    # Unique key suffix to avoid widget conflicts
+    key_id = zip_code or area or "default"
+
+    # Layer toggles
+    toggle_cols = st.columns(4)
+    show_311 = toggle_cols[0].checkbox("311 requests", value=True,
+                                        key=f"map_311_{key_prefix}_{key_id}")
+    show_permits = toggle_cols[1].checkbox("permits", value=False,
+                                            key=f"map_permits_{key_prefix}_{key_id}")
+    show_crime = toggle_cols[2].checkbox("crime", value=False,
+                                          key=f"map_crime_{key_prefix}_{key_id}")
+    show_solar = toggle_cols[3].checkbox("solar", value=False,
+                                          key=f"map_solar_{key_prefix}_{key_id}")
+
+    # Year range
+    yr_min, yr_max = st.slider(
+        "year range", min_value=2019, max_value=2025, value=(2022, 2025),
+        key=f"map_year_{key_prefix}_{key_id}",
+    )
+
+    layers = []
+
+    if show_311:
+        df_311 = _load_map_layer("311", filter_zip, yr_min, yr_max)
+        if not df_311.empty:
+            layers.append(pdk.Layer(
+                "HexagonLayer",
+                data=df_311,
+                get_position=["lng", "lat"],
+                radius=100,
+                elevation_scale=4,
+                elevation_range=[0, 500],
+                extruded=False,
+                pickable=True,
+                color_range=[
+                    [65, 182, 196],
+                    [127, 205, 187],
+                    [199, 233, 180],
+                    [237, 248, 177],
+                    [255, 255, 204],
+                    [255, 237, 160],
+                ],
+            ))
+
+    if show_permits:
+        df_permits = _load_map_layer("permits", filter_zip, yr_min, yr_max)
+        if not df_permits.empty:
+            # Color by type: solar=green, other=blue
+            df_permits = df_permits.copy()
+            df_permits["color_r"] = df_permits.apply(
+                lambda r: 76 if r.get("is_solar") else 131, axis=1
+            )
+            df_permits["color_g"] = df_permits.apply(
+                lambda r: 175 if r.get("is_solar") else 201, axis=1
+            )
+            df_permits["color_b"] = df_permits.apply(
+                lambda r: 80 if r.get("is_solar") else 255, axis=1
+            )
+            layers.append(pdk.Layer(
+                "ScatterplotLayer",
+                data=df_permits,
+                get_position=["lng", "lat"],
+                get_fill_color=["color_r", "color_g", "color_b", 160],
+                get_radius=40,
+                pickable=True,
+            ))
+
+    if show_crime:
+        df_crime = _load_map_layer("crime", filter_zip, yr_min, yr_max)
+        if not df_crime.empty:
+            layers.append(pdk.Layer(
+                "HexagonLayer",
+                data=df_crime,
+                get_position=["lng", "lat"],
+                radius=100,
+                elevation_scale=4,
+                extruded=False,
+                pickable=True,
+                color_range=[
+                    [255, 255, 178],
+                    [254, 204, 92],
+                    [253, 141, 60],
+                    [240, 59, 32],
+                    [189, 0, 38],
+                    [128, 0, 38],
+                ],
+            ))
+
+    if show_solar:
+        df_solar = _load_map_layer("solar", filter_zip, yr_min, yr_max)
+        if not df_solar.empty:
+            layers.append(pdk.Layer(
+                "ScatterplotLayer",
+                data=df_solar,
+                get_position=["lng", "lat"],
+                get_fill_color=[76, 175, 80, 180],
+                get_radius=50,
+                pickable=True,
+            ))
+
+    st.pydeck_chart(pdk.Deck(
+        initial_view_state=pdk.ViewState(
+            latitude=center_lat, longitude=center_lng, zoom=zoom, pitch=0,
+        ),
+        layers=layers,
+        map_style="mapbox://styles/mapbox/light-v11",
+    ))
+
+
 def _flat_profile(p):
     """Flatten a nested profile dict for metric access."""
     flat = {}
@@ -500,41 +650,16 @@ def _render_category_comparison_chart(top_cats_a, top_cats_b, name_a, name_b):
     st.plotly_chart(fig, use_container_width=True)
 
 
-# approximate zip code centroids for SD area
-ZIP_COORDS: dict[str, tuple[float, float]] = {
-    "92101": (32.7194, -117.1628),
-    "92102": (32.7085, -117.1245),
-    "92103": (32.7488, -117.1713),
-    "92104": (32.7499, -117.1305),
-    "92105": (32.7344, -117.1016),
-    "92106": (32.7184, -117.2349),
-    "92107": (32.7453, -117.2500),
-    "92108": (32.7720, -117.1560),
-    "92109": (32.7935, -117.2485),
-    "92110": (32.7664, -117.2023),
-    "92111": (32.7940, -117.1693),
-    "92113": (32.6912, -117.1213),
-    "92114": (32.6865, -117.0758),
-    "92115": (32.7563, -117.0708),
-    "92116": (32.7651, -117.1252),
-    "92117": (32.8271, -117.2020),
-    "92118": (32.6766, -117.1692),
-    "92119": (32.7836, -117.0297),
-    "92120": (32.7942, -117.0714),
-    "92121": (32.8987, -117.2248),
-    "92122": (32.8580, -117.2088),
-    "92123": (32.8160, -117.1475),
-    "92124": (32.8232, -117.0887),
-    "92126": (32.9136, -117.1550),
-    "92127": (33.0239, -117.0869),
-    "92128": (32.9996, -117.0619),
-    "92129": (32.9585, -117.1235),
-    "92130": (32.9462, -117.2198),
-    "92131": (32.9174, -117.1009),
-    "92139": (32.6647, -117.0654),
-    "92154": (32.5773, -117.0506),
-    "92173": (32.5483, -117.0443),
-}
+@st.cache_data(ttl=3600)
+def _load_zip_coords() -> dict[str, tuple[float, float]]:
+    """Load zip centroids from parquet (replaces hardcoded ZIP_COORDS)."""
+    coords = queries.get_zip_centroids()
+    if not coords:
+        # Fallback to a few key zips if parquet missing
+        return {"92101": (32.7194, -117.1628)}
+    return coords
+
+ZIP_COORDS = _load_zip_coords()
 
 
 def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
@@ -812,19 +937,7 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
 
     # Map
     st.subheader("map")
-
-    lat, lon = ZIP_COORDS.get(zip_code, (32.7157, -117.1611))
-
-    st.pydeck_chart(pdk.Deck(
-        initial_view_state=pdk.ViewState(
-            latitude=lat,
-            longitude=lon,
-            zoom=13,
-            pitch=0,
-        ),
-        layers=[],
-        map_style="mapbox://styles/mapbox/light-v11",
-    ))
+    _render_map(zip_code=zip_code, key_prefix=key_prefix)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -977,6 +1090,10 @@ with tab_explorer:
                 )
             else:
                 st.info("no zip code data available for this area")
+
+            st.divider()
+            st.subheader("map")
+            _render_map(area=selected_area, key_prefix=f"area_{selected_area}")
 
             st.divider()
 
