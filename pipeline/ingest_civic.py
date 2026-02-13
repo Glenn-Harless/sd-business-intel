@@ -21,6 +21,14 @@ CIVIC_SOURCES: dict[str, str] = {
     "sd-get-it-done/data/aggregated/top_problem_types.parquet": "civic_311_services.parquet",
     "sd-housing-permits/data/aggregated/approval_timelines.parquet": "civic_permit_timelines.parquet",
     "sd-climate-action/data/aggregated/energy_by_zip_annual.parquet": "civic_energy.parquet",
+    # Phase 3: map point layers
+    "sd-get-it-done/data/aggregated/map_points.parquet": "map_311.parquet",
+    "sd-housing-permits/data/aggregated/map_points.parquet": "map_permits.parquet",
+    "sd-public-safety/data/aggregated/map_points.parquet": "map_crime.parquet",
+    "sd-climate-action/data/aggregated/solar_map_points.parquet": "map_solar.parquet",
+    # Phase 3d: crime detail
+    "sd-public-safety/data/aggregated/crime_by_type.parquet": "civic_crime_detail.parquet",
+    "sd-public-safety/data/aggregated/temporal_patterns.parquet": "civic_crime_temporal.parquet",
 }
 
 
