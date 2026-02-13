@@ -472,6 +472,12 @@ def _build_aggregates(con: duckdb.DuckDBPyConnection) -> None:
     # 8. trend parquets
     _build_trends(con)
 
+    # 9. business age analysis
+    _build_business_age(con)
+
+    # 10. momentum scores
+    _build_momentum(con)
+
 
 def _build_neighborhood_profile(
     con: duckdb.DuckDBPyConnection, has_biz: bool, has_demo: bool
@@ -737,6 +743,299 @@ def _build_trends(con: duckdb.DuckDBPyConnection) -> None:
         print(f"  [done] trend_311_monthly.parquet -> {count:,} rows")
     else:
         print("  [skip] trend_311_monthly.parquet (no 311 monthly data)")
+
+
+def _build_business_age(con: duckdb.DuckDBPyConnection) -> None:
+    """Build business_age_stats.parquet and business_age_by_area.parquet."""
+    biz_path = PROCESSED_DIR / "businesses.parquet"
+    if not biz_path.exists():
+        print("  [skip] business age parquets (no businesses)")
+        return
+
+    # 1. business_age_stats.parquet — per zip_code + category
+    con.execute(f"""
+        COPY (
+            SELECT
+                zip_code,
+                category,
+                COUNT(*) AS business_count,
+                ROUND(MEDIAN(DATEDIFF('day', start_date, CURRENT_DATE) / 365.25), 1) AS median_age_years,
+                ROUND(AVG(DATEDIFF('day', start_date, CURRENT_DATE) / 365.25), 1) AS avg_age_years,
+                ROUND(100.0 * SUM(CASE WHEN DATEDIFF('day', start_date, CURRENT_DATE) < 730 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_under_2yr,
+                ROUND(100.0 * SUM(CASE WHEN DATEDIFF('day', start_date, CURRENT_DATE) > 3652 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_over_10yr
+            FROM '{biz_path}'
+            WHERE start_date IS NOT NULL AND status = 'active'
+            GROUP BY zip_code, category
+            HAVING COUNT(*) >= 3
+            ORDER BY zip_code, business_count DESC
+        ) TO '{AGG_DIR}/business_age_stats.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
+    count = con.execute(f"""
+        SELECT COUNT(*) FROM '{AGG_DIR}/business_age_stats.parquet'
+    """).fetchone()[0]
+    print(f"  [done] business_age_stats.parquet -> {count:,} rows")
+
+    # 2. business_age_by_area.parquet — per area + category
+    # Build ZIP_TO_AREA as VALUES-based temp table (same pattern as _build_area_profiles)
+    rows = [(z, a) for z, a in ZIP_TO_AREA.items()]
+    con.execute("CREATE OR REPLACE TABLE za_age(zip_code VARCHAR, area VARCHAR)")
+    con.executemany("INSERT INTO za_age VALUES (?, ?)", rows)
+
+    # Include unmapped profiled zips as "Other"
+    np_path = AGG_DIR / "neighborhood_profile.parquet"
+    if np_path.exists():
+        con.execute(f"""
+            INSERT INTO za_age
+            SELECT np.zip_code, 'Other'
+            FROM '{np_path}' np
+            WHERE np.zip_code NOT IN (SELECT zip_code FROM za_age)
+        """)
+
+    con.execute(f"""
+        COPY (
+            SELECT
+                COALESCE(za.area, 'Other') AS area,
+                b.category,
+                COUNT(*) AS business_count,
+                ROUND(MEDIAN(DATEDIFF('day', b.start_date, CURRENT_DATE) / 365.25), 1) AS median_age_years,
+                ROUND(AVG(DATEDIFF('day', b.start_date, CURRENT_DATE) / 365.25), 1) AS avg_age_years,
+                ROUND(100.0 * SUM(CASE WHEN DATEDIFF('day', b.start_date, CURRENT_DATE) < 730 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_under_2yr,
+                ROUND(100.0 * SUM(CASE WHEN DATEDIFF('day', b.start_date, CURRENT_DATE) > 3652 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_over_10yr
+            FROM '{biz_path}' b
+            LEFT JOIN za_age za ON b.zip_code = za.zip_code
+            WHERE b.start_date IS NOT NULL AND b.status = 'active'
+              AND b.zip_code IN (SELECT zip_code FROM za_age)
+            GROUP BY COALESCE(za.area, 'Other'), b.category
+            HAVING COUNT(*) >= 3
+            ORDER BY area, business_count DESC
+        ) TO '{AGG_DIR}/business_age_by_area.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
+    count = con.execute(f"""
+        SELECT COUNT(*) FROM '{AGG_DIR}/business_age_by_area.parquet'
+    """).fetchone()[0]
+    print(f"  [done] business_age_by_area.parquet -> {count:,} rows")
+
+
+def _build_momentum(con: duckdb.DuckDBPyConnection) -> None:
+    """Build momentum_scores.parquet and momentum_by_area.parquet."""
+    # We need at least trend_business_formation to proceed
+    biz_trend_path = AGG_DIR / "trend_business_formation.parquet"
+    if not biz_trend_path.exists():
+        print("  [skip] momentum parquets (no trend data)")
+        return
+
+    permits_path = AGG_DIR / "civic_permits.parquet"
+    crime_path = AGG_DIR / "civic_crime.parquet"
+    solar_path = AGG_DIR / "civic_solar.parquet"
+
+    # Build CTEs for each YoY metric
+    # Business formation YoY
+    biz_cte = f"""
+        biz_yoy AS (
+            SELECT
+                zip_code,
+                SUM(CASE WHEN year = 2025 THEN new_businesses ELSE 0 END) AS val_2025,
+                SUM(CASE WHEN year = 2024 THEN new_businesses ELSE 0 END) AS val_2024,
+                CASE
+                    WHEN SUM(CASE WHEN year = 2024 THEN new_businesses ELSE 0 END) > 0
+                    THEN ROUND(100.0 * (
+                        SUM(CASE WHEN year = 2025 THEN new_businesses ELSE 0 END) -
+                        SUM(CASE WHEN year = 2024 THEN new_businesses ELSE 0 END)
+                    ) / SUM(CASE WHEN year = 2024 THEN new_businesses ELSE 0 END), 1)
+                    ELSE NULL
+                END AS biz_formation_yoy
+            FROM '{biz_trend_path}'
+            WHERE year IN (2024, 2025)
+            GROUP BY zip_code
+            HAVING SUM(CASE WHEN year = 2024 THEN new_businesses ELSE 0 END) > 0
+               OR SUM(CASE WHEN year = 2025 THEN new_businesses ELSE 0 END) > 0
+        )
+    """
+
+    # Permits YoY
+    if permits_path.exists():
+        permit_cte = f"""
+        permit_yoy AS (
+            SELECT
+                zip_code,
+                CASE
+                    WHEN SUM(CASE WHEN year = 2024 THEN permit_count ELSE 0 END) > 0
+                    THEN ROUND(100.0 * (
+                        SUM(CASE WHEN year = 2025 THEN permit_count ELSE 0 END) -
+                        SUM(CASE WHEN year = 2024 THEN permit_count ELSE 0 END)
+                    ) / SUM(CASE WHEN year = 2024 THEN permit_count ELSE 0 END), 1)
+                    ELSE NULL
+                END AS permit_yoy
+            FROM '{permits_path}'
+            WHERE year IN (2024, 2025)
+            GROUP BY zip_code
+            HAVING SUM(CASE WHEN year = 2024 THEN permit_count ELSE 0 END) > 0
+               OR SUM(CASE WHEN year = 2025 THEN permit_count ELSE 0 END) > 0
+        )"""
+    else:
+        permit_cte = """
+        permit_yoy AS (
+            SELECT NULL::VARCHAR AS zip_code, NULL::DOUBLE AS permit_yoy
+            WHERE FALSE
+        )"""
+
+    # Crime YoY (inverted: decrease = positive)
+    if crime_path.exists():
+        crime_cte = f"""
+        crime_yoy AS (
+            SELECT
+                zip_code,
+                CASE
+                    WHEN SUM(CASE WHEN year = 2024 THEN count ELSE 0 END) > 0
+                    THEN ROUND(-100.0 * (
+                        SUM(CASE WHEN year = 2025 THEN count ELSE 0 END) -
+                        SUM(CASE WHEN year = 2024 THEN count ELSE 0 END)
+                    ) / SUM(CASE WHEN year = 2024 THEN count ELSE 0 END), 1)
+                    ELSE NULL
+                END AS crime_yoy
+            FROM '{crime_path}'
+            WHERE year IN (2024, 2025)
+            GROUP BY zip_code
+            HAVING SUM(CASE WHEN year = 2024 THEN count ELSE 0 END) > 0
+               OR SUM(CASE WHEN year = 2025 THEN count ELSE 0 END) > 0
+        )"""
+    else:
+        crime_cte = """
+        crime_yoy AS (
+            SELECT NULL::VARCHAR AS zip_code, NULL::DOUBLE AS crime_yoy
+            WHERE FALSE
+        )"""
+
+    # Solar YoY
+    if solar_path.exists():
+        solar_cte = f"""
+        solar_yoy AS (
+            SELECT
+                zip_code,
+                CASE
+                    WHEN SUM(CASE WHEN year = 2024 THEN solar_count ELSE 0 END) > 0
+                    THEN ROUND(100.0 * (
+                        SUM(CASE WHEN year = 2025 THEN solar_count ELSE 0 END) -
+                        SUM(CASE WHEN year = 2024 THEN solar_count ELSE 0 END)
+                    ) / SUM(CASE WHEN year = 2024 THEN solar_count ELSE 0 END), 1)
+                    ELSE NULL
+                END AS solar_yoy
+            FROM '{solar_path}'
+            WHERE year IN (2024, 2025)
+            GROUP BY zip_code
+            HAVING SUM(CASE WHEN year = 2024 THEN solar_count ELSE 0 END) > 0
+               OR SUM(CASE WHEN year = 2025 THEN solar_count ELSE 0 END) > 0
+        )"""
+    else:
+        solar_cte = """
+        solar_yoy AS (
+            SELECT NULL::VARCHAR AS zip_code, NULL::DOUBLE AS solar_yoy
+            WHERE FALSE
+        )"""
+
+    # Combine: PERCENT_RANK each YoY, multiply by 25, COALESCE nulls to 12.5
+    # Filter to SD zips only (those in demographics_by_zip)
+    demo_path = AGG_DIR / "demographics_by_zip.parquet"
+    con.execute(f"""
+        COPY (
+            WITH
+                {biz_cte},
+                {permit_cte},
+                {crime_cte},
+                {solar_cte},
+            sd_zips AS (
+                SELECT DISTINCT zip_code FROM '{demo_path}'
+            ),
+            all_zips AS (
+                SELECT zip_code FROM sd_zips
+                WHERE zip_code IN (SELECT zip_code FROM biz_yoy)
+                   OR zip_code IN (SELECT zip_code FROM permit_yoy)
+                   OR zip_code IN (SELECT zip_code FROM crime_yoy)
+                   OR zip_code IN (SELECT zip_code FROM solar_yoy)
+            ),
+            combined AS (
+                SELECT
+                    az.zip_code,
+                    b.biz_formation_yoy,
+                    p.permit_yoy,
+                    c.crime_yoy,
+                    s.solar_yoy
+                FROM all_zips az
+                LEFT JOIN biz_yoy b ON az.zip_code = b.zip_code
+                LEFT JOIN permit_yoy p ON az.zip_code = p.zip_code
+                LEFT JOIN crime_yoy c ON az.zip_code = c.zip_code
+                LEFT JOIN solar_yoy s ON az.zip_code = s.zip_code
+            ),
+            ranked AS (
+                SELECT
+                    zip_code,
+                    biz_formation_yoy,
+                    permit_yoy,
+                    crime_yoy,
+                    solar_yoy,
+                    COALESCE(PERCENT_RANK() OVER (ORDER BY biz_formation_yoy) * 25, 12.5) AS biz_score,
+                    COALESCE(PERCENT_RANK() OVER (ORDER BY permit_yoy) * 25, 12.5) AS permit_score,
+                    COALESCE(PERCENT_RANK() OVER (ORDER BY crime_yoy) * 25, 12.5) AS crime_score,
+                    COALESCE(PERCENT_RANK() OVER (ORDER BY solar_yoy) * 25, 12.5) AS solar_score
+                FROM combined
+            )
+            SELECT
+                zip_code,
+                ROUND(biz_score + permit_score + crime_score + solar_score, 1) AS momentum_score,
+                biz_formation_yoy,
+                permit_yoy,
+                crime_yoy,
+                solar_yoy
+            FROM ranked
+            ORDER BY momentum_score DESC
+        ) TO '{AGG_DIR}/momentum_scores.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
+    count = con.execute(f"""
+        SELECT COUNT(*) FROM '{AGG_DIR}/momentum_scores.parquet'
+    """).fetchone()[0]
+    print(f"  [done] momentum_scores.parquet -> {count:,} rows")
+
+    # 2. momentum_by_area.parquet — population-weighted average of zip scores
+    demo_path = AGG_DIR / "demographics_by_zip.parquet"
+    if not demo_path.exists():
+        print("  [skip] momentum_by_area.parquet (no demographics)")
+        return
+
+    rows = [(z, a) for z, a in ZIP_TO_AREA.items()]
+    con.execute("CREATE OR REPLACE TABLE za_momentum(zip_code VARCHAR, area VARCHAR)")
+    con.executemany("INSERT INTO za_momentum VALUES (?, ?)", rows)
+
+    # Include unmapped profiled zips as "Other"
+    np_path = AGG_DIR / "neighborhood_profile.parquet"
+    if np_path.exists():
+        con.execute(f"""
+            INSERT INTO za_momentum
+            SELECT np.zip_code, 'Other'
+            FROM '{np_path}' np
+            WHERE np.zip_code NOT IN (SELECT zip_code FROM za_momentum)
+        """)
+
+    con.execute(f"""
+        COPY (
+            SELECT
+                za.area,
+                ROUND(SUM(m.momentum_score * CAST(d.population AS DOUBLE)) / NULLIF(SUM(CAST(d.population AS DOUBLE)), 0), 1) AS momentum_score,
+                ROUND(SUM(m.biz_formation_yoy * CAST(d.population AS DOUBLE)) / NULLIF(SUM(CASE WHEN m.biz_formation_yoy IS NOT NULL THEN CAST(d.population AS DOUBLE) ELSE 0 END), 0), 1) AS biz_formation_yoy,
+                ROUND(SUM(m.permit_yoy * CAST(d.population AS DOUBLE)) / NULLIF(SUM(CASE WHEN m.permit_yoy IS NOT NULL THEN CAST(d.population AS DOUBLE) ELSE 0 END), 0), 1) AS permit_yoy,
+                ROUND(SUM(m.crime_yoy * CAST(d.population AS DOUBLE)) / NULLIF(SUM(CASE WHEN m.crime_yoy IS NOT NULL THEN CAST(d.population AS DOUBLE) ELSE 0 END), 0), 1) AS crime_yoy,
+                ROUND(SUM(m.solar_yoy * CAST(d.population AS DOUBLE)) / NULLIF(SUM(CASE WHEN m.solar_yoy IS NOT NULL THEN CAST(d.population AS DOUBLE) ELSE 0 END), 0), 1) AS solar_yoy
+            FROM '{AGG_DIR}/momentum_scores.parquet' m
+            JOIN '{demo_path}' d ON m.zip_code = d.zip_code
+            LEFT JOIN za_momentum za ON m.zip_code = za.zip_code
+            WHERE za.area IS NOT NULL
+            GROUP BY za.area
+            ORDER BY momentum_score DESC
+        ) TO '{AGG_DIR}/momentum_by_area.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
+    count = con.execute(f"""
+        SELECT COUNT(*) FROM '{AGG_DIR}/momentum_by_area.parquet'
+    """).fetchone()[0]
+    print(f"  [done] momentum_by_area.parquet -> {count:,} rows")
 
 
 def _build_city_averages(
