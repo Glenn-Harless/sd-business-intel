@@ -9,6 +9,7 @@ class FilterOptions(BaseModel):
     zip_codes: list[str]
     categories: list[str]
     statuses: list[str]
+    areas: list[str] = []
 
 
 class HealthResponse(BaseModel):
@@ -49,6 +50,9 @@ class CivicSignals(BaseModel):
     crime_count: int | None = None
     median_311_days: float | None = None
     total_311_requests: int | None = None
+    crime_breakdown: list = []
+    energy: dict | None = None
+    permit_timelines: list = []
 
 
 class ComparisonValue(BaseModel):
@@ -74,6 +78,8 @@ class NeighborhoodProfile(BaseModel):
     data_as_of: str | None = None
     narrative: str = ""
     area: str | None = None
+    momentum: dict | None = None
+    business_age: list = []
 
 
 class HeadToHeadMetric(BaseModel):
@@ -135,6 +141,8 @@ class AreaProfile(BaseModel):
     civic_signals: CivicSignals
     comparison_to_avg: dict[str, ComparisonValue] = {}
     narrative: str = ""
+    momentum: dict | None = None
+    business_age: list = []
 
 
 class AreaComparison(BaseModel):
@@ -168,6 +176,51 @@ class TrendSeries(BaseModel):
     permits: list[TrendPoint] = []
     crime: list[TrendPoint] = []
     solar: list[TrendPoint] = []
+
+
+class CrimeBreakdown(BaseModel):
+    crime_against: str = ""
+    count: int = 0
+
+
+class EnergyBenchmark(BaseModel):
+    avg_kwh_per_customer: float | None = None
+    total_kwh: float | None = None
+    elec_customers: int | None = None
+
+
+class PermitTimeline(BaseModel):
+    permit_type: str = ""
+    permit_count: int = 0
+    median_days: float | None = None
+
+
+class MomentumScore(BaseModel):
+    zip_code: str | None = None
+    area: str | None = None
+    momentum_score: float | None = None
+    biz_formation_yoy: float | None = None
+    permit_yoy: float | None = None
+    crime_yoy: float | None = None
+    solar_yoy: float | None = None
+
+
+class BusinessAge(BaseModel):
+    category: str = ""
+    business_count: int = 0
+    median_age_years: float | None = None
+    avg_age_years: float | None = None
+    pct_under_2yr: float | None = None
+    pct_over_10yr: float | None = None
+
+
+class ServiceType(BaseModel):
+    service_name: str = ""
+    total_requests: int = 0
+    closed_requests: int = 0
+    avg_resolution_days: float | None = None
+    median_resolution_days: float | None = None
+    close_rate_pct: float | None = None
 
 
 class AreaZipSummary(BaseModel):

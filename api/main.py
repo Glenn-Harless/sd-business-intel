@@ -150,3 +150,28 @@ def zip_trends(zip: str = Query(..., description="Zip code")):
 def area_trends(area: str = Query(..., description="Area name")):
     """Year-over-year trend data for an area: business formation, permits, crime, solar."""
     return queries.get_area_trends(area)
+
+
+@app.get("/momentum")
+def momentum(limit: int = 20):
+    return queries.get_momentum_scores(limit)
+
+
+@app.get("/area-momentum")
+def area_momentum(limit: int = 20):
+    return queries.get_area_momentum(limit)
+
+
+@app.get("/business-age/{zip_code}")
+def business_age(zip_code: str):
+    return queries.get_business_age(zip_code)
+
+
+@app.get("/area-business-age/{area}")
+def area_business_age(area: str):
+    return queries.get_area_business_age(area)
+
+
+@app.get("/311-services")
+def services_311():
+    return queries.get_311_services()

@@ -1,6 +1,6 @@
 """MCP server for SD Business Intel.
 
-Exposes 13 tools that let Claude query business intelligence parquets directly.
+Exposes 18 tools that let Claude query business intelligence parquets directly.
 Uses FastMCP (v2) with stdio transport — spawned by Claude Code as a subprocess.
 """
 
@@ -156,6 +156,48 @@ def get_area_trends(area: str) -> dict:
     Returns aggregated time-series across the area's zip codes
     for business formation, permits, crime, and solar."""
     return queries.get_area_trends(area)
+
+
+@mcp.tool()
+def get_momentum_scores(limit: int = 20) -> list[dict]:
+    """Rank San Diego zip codes by momentum score (0-100).
+
+    Composite score combining business formation, permit activity,
+    crime trends, and solar adoption year-over-year changes."""
+    return queries.get_momentum_scores(limit)
+
+
+@mcp.tool()
+def get_area_momentum(limit: int = 20) -> list[dict]:
+    """Rank San Diego areas by momentum score (0-100).
+
+    Population-weighted composite of zip-level momentum scores."""
+    return queries.get_area_momentum(limit)
+
+
+@mcp.tool()
+def get_business_age(zip_code: str) -> list[dict]:
+    """Get business age statistics by category for a zip code.
+
+    Shows median age, avg age, pct under 2 years, pct over 10 years."""
+    return queries.get_business_age(zip_code)
+
+
+@mcp.tool()
+def get_area_business_age(area: str) -> list[dict]:
+    """Get business age statistics by category for an area.
+
+    Shows median age, avg age, pct under 2 years, pct over 10 years."""
+    return queries.get_area_business_age(area)
+
+
+@mcp.tool()
+def get_311_services() -> list[dict]:
+    """Get city-wide 311 service type breakdown.
+
+    Returns 47 service types with total requests, resolution times,
+    and close rates. City-wide data (not zip-level)."""
+    return queries.get_311_services()
 
 
 def main():
