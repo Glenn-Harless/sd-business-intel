@@ -801,7 +801,7 @@ def get_area_profile(area: str) -> dict:
 
     # city avg per-1k for each category (total/total method)
     bz_path = _q("data/aggregated/business_by_zip.parquet")
-    demo_path = _q("data/processed/demographics.parquet")
+    demo_path = _q("data/aggregated/demographics_by_zip.parquet")
     for cat in top_cats:
         city_cat = _run_one(f"""
             SELECT ROUND(1000.0 * SUM(bz.active_count) / NULLIF(
