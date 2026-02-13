@@ -175,3 +175,42 @@ def area_business_age(area: str):
 @app.get("/311-services")
 def services_311():
     return queries.get_311_services()
+
+
+@app.get("/map-points")
+def map_points(
+    layer: str = Query(..., description="Layer: 311, permits, crime, or solar"),
+    zip_code: str | None = Query(None, description="Center zip code for spatial filter"),
+    year_min: int | None = Query(None, description="Minimum year"),
+    year_max: int | None = Query(None, description="Maximum year"),
+    limit: int = Query(50000, ge=1, le=100000, description="Max points"),
+):
+    """Get lat/lng points for a map layer, filtered by location and time."""
+    return queries.get_map_points(layer, zip_code, year_min, year_max, limit)
+
+
+@app.get("/city-trends")
+def city_trends():
+    """City-wide per-zip average time-series for all trend metrics."""
+    return queries.get_city_trends()
+
+
+@app.get("/competitors")
+def competitors(
+    category: str = Query(..., description="Business category"),
+    zip_code: str = Query(..., description="Center zip code"),
+):
+    """Competitor analysis: businesses in category for a zip + geographically nearby context."""
+    return queries.get_competitors(category, zip_code)
+
+
+@app.get("/crime-detail")
+def crime_detail(year: int | None = Query(None, description="Year (default: latest)")):
+    """City-wide offense group breakdown."""
+    return queries.get_crime_detail(year)
+
+
+@app.get("/crime-temporal")
+def crime_temporal(year: int | None = Query(None, description="Year (default: latest)")):
+    """Day-of-week x month crime patterns (city-wide)."""
+    return queries.get_crime_temporal(year)

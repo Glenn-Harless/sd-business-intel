@@ -200,6 +200,57 @@ def get_311_services() -> list[dict]:
     return queries.get_311_services()
 
 
+@mcp.tool()
+def get_map_points(
+    layer: str,
+    zip_code: str | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    limit: int = 50000,
+) -> list[dict]:
+    """Get lat/lng map points for a civic data layer.
+
+    Layers: 311 (service requests), permits (construction), crime, solar.
+    Optionally filter by zip_code (spatial bounding box) and year range."""
+    return queries.get_map_points(layer, zip_code, year_min, year_max, limit)
+
+
+@mcp.tool()
+def get_city_trends() -> dict:
+    """Get city-wide per-zip average time-series trends.
+
+    Returns average-per-zip values for business formation, permits, crime,
+    and solar. Use for chart comparison lines against individual zips."""
+    return queries.get_city_trends()
+
+
+@mcp.tool()
+def find_competitors(category: str, zip_code: str) -> dict:
+    """Find competitors in a business category near a zip code.
+
+    Returns matching businesses, density per 1k residents, city average
+    density, and geographically nearby zip codes with same-category counts."""
+    return queries.get_competitors(category, zip_code)
+
+
+@mcp.tool()
+def get_crime_detail(year: int | None = None) -> list[dict]:
+    """Get city-wide crime breakdown by offense group.
+
+    Returns 36 offense types (larceny, assault, vandalism, etc.) with
+    counts and crime_against category. Defaults to latest year."""
+    return queries.get_crime_detail(year)
+
+
+@mcp.tool()
+def get_crime_temporal(year: int | None = None) -> list[dict]:
+    """Get city-wide crime temporal patterns.
+
+    Returns day-of-week x month breakdown showing when crime occurs.
+    Useful for assessing risk during business operating hours."""
+    return queries.get_crime_temporal(year)
+
+
 def main():
     mcp.run()
 
