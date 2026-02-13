@@ -250,6 +250,12 @@ def _load_city_trends() -> dict:
     return queries.get_city_trends()
 
 
+@st.cache_data(ttl=3600)
+def _load_competitors(category: str, zip_code: str) -> dict:
+    """Load competitor analysis via the query layer."""
+    return queries.get_competitors(category, zip_code)
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -1021,7 +1027,9 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
 # ══════════════════════════════════════════════════════════════
 # Tabs
 # ══════════════════════════════════════════════════════════════
-tab_explorer, tab_compare, tab_rankings = st.tabs(["explorer", "compare", "rankings"])
+tab_explorer, tab_compare, tab_rankings, tab_competitors = st.tabs(
+    ["explorer", "compare", "rankings", "competitors"]
+)
 
 # ── EXPLORER TAB ──
 with tab_explorer:
@@ -1627,6 +1635,149 @@ with tab_rankings:
             )
         else:
             st.info("no ranking data available")
+
+# ── COMPETITORS TAB ──
+with tab_competitors:
+    st.subheader("competitive landscape")
+    st.caption("find competitors in any business category")
+
+    comp_cols = st.columns(2)
+    with comp_cols[0]:
+        categories = _category_options()
+        comp_cat = st.selectbox(
+            "business category",
+            categories if categories else ["No categories available"],
+            key="comp_category",
+        )
+    with comp_cols[1]:
+        comp_zip_labels = [f"{z} — {n}" if n else z for z, n in zip_options]
+        comp_zip_sel = st.selectbox(
+            "zip code",
+            comp_zip_labels,
+            index=next(
+                (i for i, (z, _) in enumerate(zip_options) if z == (selected_zip or "92101")),
+                0,
+            ),
+            key="comp_zip",
+        )
+        comp_zip_idx = comp_zip_labels.index(comp_zip_sel)
+        comp_zip = zip_options[comp_zip_idx][0]
+
+    if comp_cat and comp_zip:
+        comp_data = _load_competitors(comp_cat, comp_zip)
+
+        # Summary metrics
+        r1 = st.columns(3)
+        r1[0].metric(f"{comp_cat.lower()} in {comp_zip}", comp_data.get("count", 0))
+        density = comp_data.get("density")
+        city_avg = comp_data.get("city_avg_density")
+        if density is not None:
+            delta = None
+            if city_avg:
+                diff = density - city_avg
+                delta = f"{diff:+.1f} vs city avg ({city_avg}/1k)"
+            r1[1].metric("per 1,000 residents", f"{density:.1f}", delta, delta_color="off")
+        if city_avg is not None:
+            r1[2].metric("city avg density", f"{city_avg:.1f}/1k")
+
+        st.divider()
+
+        # Nearby zips comparison (geographically filtered)
+        nearby = comp_data.get("nearby_zips", [])
+        if nearby:
+            st.subheader(f"nearby zip codes with {comp_cat.lower()}")
+
+            # Map: scatter dots sized by competitor count
+            nearby_with_coords = []
+            for n in nearby:
+                zc = n["zip_code"]
+                if zc in ZIP_COORDS:
+                    lat, lng = ZIP_COORDS[zc]
+                    nearby_with_coords.append({
+                        "zip_code": zc,
+                        "neighborhood": n.get("neighborhood", ""),
+                        "count": n.get("active_count", 0),
+                        "per_1k": n.get("per_1k", 0),
+                        "lat": lat,
+                        "lng": lng,
+                        "is_selected": zc == comp_zip,
+                    })
+
+            if nearby_with_coords:
+                map_df = pd.DataFrame(nearby_with_coords)
+                map_df["color_r"] = map_df["is_selected"].apply(lambda x: 255 if x else 131)
+                map_df["color_g"] = map_df["is_selected"].apply(lambda x: 107 if x else 201)
+                map_df["color_b"] = map_df["is_selected"].apply(lambda x: 80 if x else 255)
+                map_df["radius"] = map_df["count"].apply(
+                    lambda c: max(200, min(1500, c * 30))
+                )
+
+                center_lat, center_lng = ZIP_COORDS.get(comp_zip, (32.7157, -117.1611))
+
+                st.pydeck_chart(pdk.Deck(
+                    initial_view_state=pdk.ViewState(
+                        latitude=center_lat, longitude=center_lng,
+                        zoom=11, pitch=0,
+                    ),
+                    layers=[pdk.Layer(
+                        "ScatterplotLayer",
+                        data=map_df,
+                        get_position=["lng", "lat"],
+                        get_fill_color=["color_r", "color_g", "color_b", 180],
+                        get_radius="radius",
+                        pickable=True,
+                    )],
+                    tooltip={
+                        "text": "{zip_code} ({neighborhood})\n{count} businesses\n{per_1k}/1k residents"
+                    },
+                    map_style="mapbox://styles/mapbox/light-v11",
+                ))
+
+            # Table
+            nearby_df = pd.DataFrame(nearby)
+            rename = {
+                "zip_code": "zip code",
+                "neighborhood": "neighborhood",
+                "active_count": "count",
+                "per_1k": "per 1k residents",
+            }
+            display_cols = [c for c in rename if c in nearby_df.columns]
+            nearby_display = nearby_df[display_cols].rename(columns=rename)
+
+            # Add vs city avg column
+            if city_avg and city_avg > 0:
+                nearby_display["vs city avg"] = nearby_display["per 1k residents"].apply(
+                    lambda x: f"{((x / city_avg) - 1) * 100:+.0f}%" if x else "\u2014"
+                )
+
+            st.dataframe(
+                nearby_display,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 35 * len(nearby_display) + 38),
+            )
+
+        st.divider()
+
+        # Business directory
+        businesses = comp_data.get("businesses", [])
+        if businesses:
+            st.subheader(f"business directory ({len(businesses)} results)")
+            biz_df = pd.DataFrame(businesses)
+            display_biz_cols = ["business_name", "address", "start_date"]
+            display_biz = biz_df[[c for c in display_biz_cols if c in biz_df.columns]]
+            display_biz = display_biz.rename(columns={
+                "business_name": "name",
+                "start_date": "since",
+            })
+            st.dataframe(
+                display_biz,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 35 * len(display_biz) + 38),
+            )
+        else:
+            st.info(f"no {comp_cat.lower()} businesses found in {comp_zip}")
 
 # ── Footer ──
 st.divider()
