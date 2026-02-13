@@ -58,7 +58,87 @@ def ingest(*, force: bool = False) -> list[Path]:
         print(f"  [copy] {dest_name} (source modified {mod_date})")
         copied.append(dest)
 
+    # Build zip centroids from Census Gazetteer
+    centroid_path = build_zip_centroids(force=force)
+    if centroid_path:
+        copied.append(centroid_path)
+
     return copied
+
+
+def build_zip_centroids(*, force: bool = False) -> Path | None:
+    """Download Census Gazetteer ZCTA centroids and save as parquet."""
+    dest = AGG_DIR / "zip_centroids.parquet"
+    if dest.exists() and not force:
+        print("  [skip] zip_centroids.parquet (already exists)")
+        return dest
+
+    import csv
+    import io
+    import urllib.request
+    import zipfile
+
+    url = "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2023_Gazetteer/2023_Gaz_zcta_national.zip"
+    print(f"  [download] Census ZCTA centroids from {url}")
+
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            zip_bytes = resp.read()
+    except Exception as e:
+        print(f"  [error] failed to download centroids: {e}")
+        return None
+
+    # Extract the .txt from the zip archive
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            txt_names = [n for n in zf.namelist() if n.endswith(".txt")]
+            if not txt_names:
+                print("  [error] no .txt file found in zip archive")
+                return None
+            text = zf.read(txt_names[0]).decode("utf-8")
+    except Exception as e:
+        print(f"  [error] failed to extract centroids zip: {e}")
+        return None
+
+    # Tab-delimited with columns: GEOID, ALAND, AWATER, ALAND_SQMI, AWATER_SQMI, INTPTLAT, INTPTLONG
+    # Note: Gazetteer file has fixed-width padding — keys/values need stripping
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    rows = []
+    for row in reader:
+        stripped = {k.strip(): v.strip() for k, v in row.items()}
+        zcta = stripped.get("GEOID", "")
+        lat = stripped.get("INTPTLAT", "")
+        lng = stripped.get("INTPTLONG", "")
+        if zcta and lat and lng:
+            rows.append({"zip_code": zcta, "lat": float(lat), "lng": float(lng)})
+
+    if not rows:
+        print("  [error] no centroids parsed from Gazetteer file")
+        return None
+
+    # Filter to SD-profiled zips using neighborhood_profile
+    import duckdb
+    np_path = AGG_DIR / "neighborhood_profile.parquet"
+    if np_path.exists():
+        con = duckdb.connect()
+        sd_zips = set(
+            con.execute(f"SELECT DISTINCT zip_code FROM '{np_path}'")
+            .fetchdf()["zip_code"].tolist()
+        )
+        con.close()
+        rows = [r for r in rows if r["zip_code"] in sd_zips]
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.table({
+        "zip_code": [r["zip_code"] for r in rows],
+        "lat": [r["lat"] for r in rows],
+        "lng": [r["lng"] for r in rows],
+    })
+    pq.write_table(table, dest)
+    print(f"  [write] zip_centroids.parquet ({len(rows)} zips)")
+    return dest
 
 
 if __name__ == "__main__":
