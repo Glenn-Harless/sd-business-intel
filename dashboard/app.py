@@ -440,6 +440,11 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
     # Unique key suffix to avoid widget conflicts
     key_id = zip_code or area or "default"
 
+    st.caption(
+        "toggle civic data layers to see activity hotspots near this location. "
+        "brighter/larger clusters = more activity. use the year slider to filter by time period."
+    )
+
     # Layer toggles
     toggle_cols = st.columns(4)
     show_311 = toggle_cols[0].checkbox("311 requests", value=True,
@@ -537,13 +542,17 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
                 pickable=True,
             ))
 
-    st.pydeck_chart(pdk.Deck(
-        initial_view_state=pdk.ViewState(
-            latitude=center_lat, longitude=center_lng, zoom=zoom, pitch=0,
-        ),
-        layers=layers,
-        map_style="mapbox://styles/mapbox/light-v11",
-    ))
+    if not layers:
+        st.info("select a layer above to see civic activity on the map")
+    else:
+        st.pydeck_chart(pdk.Deck(
+            initial_view_state=pdk.ViewState(
+                latitude=center_lat, longitude=center_lng, zoom=zoom, pitch=0,
+            ),
+            layers=layers,
+            tooltip={"text": "{elevationValue} incidents in this area"},
+            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        ))
 
 
 def _render_trend_charts(zip_code: str | None = None, area: str | None = None,
@@ -1541,7 +1550,7 @@ with tab_compare:
                         ),
                     ],
                     tooltip={"text": "{label}"},
-                    map_style="mapbox://styles/mapbox/light-v11",
+                    map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
                 ))
 
 # ── RANKINGS TAB ──
@@ -1815,7 +1824,7 @@ with tab_competitors:
                     tooltip={
                         "text": "{zip_code} ({neighborhood})\n{count} businesses\n{per_1k}/1k residents"
                     },
-                    map_style="mapbox://styles/mapbox/light-v11",
+                    map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
                 ))
 
             # Table

@@ -23,6 +23,7 @@ packages = ["pipeline", "api", "dashboard"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+addopts = "-s"  # DuckDB 1.4.x segfaults with pytest output capture
 
 [build-system]
 requires = ["hatchling"]
