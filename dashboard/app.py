@@ -229,6 +229,11 @@ def _load_trends(zip_code: str | None = None, area: str | None = None) -> dict:
     return {}
 
 
+@st.cache_data(ttl=3600)
+def _load_311_services():
+    return queries.get_311_services()
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -244,6 +249,7 @@ _RANK_SENSE = {
     "crime_count": "low",
     "median_311_days": "low",
     "solar_installs": "high",
+    "momentum_score": "high",
 }
 
 
@@ -570,6 +576,33 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
     r2[2].metric(l, v, d, delta_color="off")
     _show_rank(r2[2], "median_home_value", percentiles)
 
+    # Momentum score
+    momentum = profile.get("momentum", {})
+    mom_score = momentum.get("momentum_score") if momentum else None
+    if _valid(mom_score):
+        r_mom = st.columns(4)
+        ms = float(mom_score)
+        if ms >= 60:
+            mom_label = "momentum score (strong)"
+        elif ms >= 40:
+            mom_label = "momentum score (moderate)"
+        else:
+            mom_label = "momentum score (slower)"
+        r_mom[0].metric(mom_label, f"{ms:.0f}/100")
+        _show_rank(r_mom[0], "momentum_score", percentiles)
+
+        # Component breakdown
+        biz_yoy = momentum.get("biz_formation_yoy")
+        permit_yoy = momentum.get("permit_yoy")
+        crime_yoy = momentum.get("crime_yoy")
+        solar_yoy = momentum.get("solar_yoy")
+        if _valid(biz_yoy):
+            r_mom[1].metric("biz formation", f"{float(biz_yoy):+.0f}% yoy")
+        if _valid(permit_yoy):
+            r_mom[2].metric("permits", f"{float(permit_yoy):+.0f}% yoy")
+        if _valid(crime_yoy):
+            r_mom[3].metric("crime trend", f"{float(crime_yoy):+.0f}% yoy", delta_color="normal")
+
     r3 = st.columns(3)
     l, v, d = _fmt_metric("% bachelor's+", edu, "avg_pct_bachelors_plus", "", 1)
     r3[0].metric(l, v, d, delta_color="normal")
@@ -598,6 +631,50 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
     l, v, d = _fmt_metric("businesses per 1k residents", biz_per_1k, "avg_businesses_per_1k", "", 1)
     r4[2].metric(l, v, d, delta_color="normal")
     _show_rank(r4[2], "businesses_per_1k", percentiles)
+
+    # Energy benchmark
+    energy = _civic.get("energy", {})
+    kwh = energy.get("avg_kwh_per_customer") if energy else None
+    if _valid(kwh):
+        r5 = st.columns(3)
+        l, v, _ = _fmt_metric("avg kwh/customer", kwh, decimals=0)
+        r5[0].metric(l, v)
+
+    # Crime breakdown
+    crime_breakdown = _civic.get("crime_breakdown", [])
+    if crime_breakdown:
+        with st.expander("crime breakdown by type", expanded=False):
+            cb_df = pd.DataFrame(crime_breakdown)
+            fig_crime = go.Figure(go.Bar(
+                x=cb_df["count"],
+                y=cb_df["crime_against"],
+                orientation="h",
+                marker_color=CHART_COLOR,
+                text=cb_df["count"],
+                textposition="outside",
+            ))
+            fig_crime.update_layout(
+                height=150,
+                margin=dict(l=0, r=40, t=0, b=0),
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="incidents",
+            )
+            st.plotly_chart(fig_crime, use_container_width=True,
+                            key=f"crime_bd_{key_prefix}_{zip_code}")
+
+    # Permit timelines
+    permit_timelines = _civic.get("permit_timelines", [])
+    if permit_timelines:
+        with st.expander("permit approval speed", expanded=False):
+            pt_df = pd.DataFrame(permit_timelines)
+            st.dataframe(pt_df, use_container_width=True, hide_index=True)
+
+    # 311 service breakdown (city-wide)
+    with st.expander("311 service breakdown (city-wide)", expanded=False):
+        services = _load_311_services()
+        if services:
+            svc_df = pd.DataFrame(services[:15])
+            st.dataframe(svc_df, use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -660,6 +737,53 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
     else:
         st.info("no business data available -- business tax cert files may be 403. "
                 "place CSVs manually in data/raw/ and re-run pipeline.")
+
+    # Business age analysis
+    business_age = profile.get("business_age", [])
+    if business_age:
+        st.subheader("business maturity")
+        ba_df = pd.DataFrame(business_age)
+
+        def _maturity(years):
+            if not _valid(years):
+                return ""
+            y = float(years)
+            if y < 2:
+                return "emerging"
+            elif y < 5:
+                return "growing"
+            elif y < 8:
+                return "maturing"
+            return "established"
+
+        ba_df["maturity"] = ba_df["median_age_years"].apply(_maturity)
+
+        color_map = {
+            "emerging": "#4CAF50",
+            "growing": "#8BC34A",
+            "maturing": "#FFC107",
+            "established": "#FF9800",
+        }
+        colors = [color_map.get(m, CHART_COLOR) for m in ba_df["maturity"]]
+
+        fig_age = go.Figure(go.Bar(
+            x=ba_df["median_age_years"],
+            y=ba_df["category"],
+            orientation="h",
+            marker_color=colors,
+            text=ba_df.apply(
+                lambda r: f"{r['median_age_years']:.1f} yr ({r['maturity']})", axis=1
+            ),
+            textposition="outside",
+        ))
+        fig_age.update_layout(
+            height=max(200, len(ba_df) * 35),
+            margin=dict(l=0, r=80, t=0, b=0),
+            yaxis=dict(autorange="reversed"),
+            xaxis_title="median age (years)",
+        )
+        st.plotly_chart(fig_age, use_container_width=True,
+                        key=f"biz_age_{key_prefix}_{zip_code}")
 
     st.divider()
 
@@ -758,6 +882,76 @@ with tab_explorer:
             l, v, _ = _fmt_metric("new permits", permits)
             r2[3].metric(l, v, _latest_yoy(area_trends, "permits"), delta_color="normal")
 
+            # Momentum score
+            a_momentum = area_profile.get("momentum", {})
+            a_mom_score = a_momentum.get("momentum_score") if a_momentum else None
+            if _valid(a_mom_score):
+                r_mom = st.columns(4)
+                ms = float(a_mom_score)
+                if ms >= 60:
+                    mom_label = "momentum score (strong)"
+                elif ms >= 40:
+                    mom_label = "momentum score (moderate)"
+                else:
+                    mom_label = "momentum score (slower)"
+                r_mom[0].metric(mom_label, f"{ms:.0f}/100")
+
+                biz_yoy = a_momentum.get("biz_formation_yoy")
+                permit_yoy = a_momentum.get("permit_yoy")
+                crime_yoy = a_momentum.get("crime_yoy")
+                solar_yoy = a_momentum.get("solar_yoy")
+                if _valid(biz_yoy):
+                    r_mom[1].metric("biz formation", f"{float(biz_yoy):+.0f}% yoy")
+                if _valid(permit_yoy):
+                    r_mom[2].metric("permits", f"{float(permit_yoy):+.0f}% yoy")
+                if _valid(crime_yoy):
+                    r_mom[3].metric("crime trend", f"{float(crime_yoy):+.0f}% yoy",
+                                    delta_color="normal")
+
+            # Energy benchmark
+            a_energy = _a_civic.get("energy", {})
+            a_kwh = a_energy.get("avg_kwh_per_customer") if a_energy else None
+            if _valid(a_kwh):
+                r5 = st.columns(4)
+                l, v, _ = _fmt_metric("avg kwh/customer", a_kwh, decimals=0)
+                r5[0].metric(l, v)
+
+            # Crime breakdown
+            a_crime_breakdown = _a_civic.get("crime_breakdown", [])
+            if a_crime_breakdown:
+                with st.expander("crime breakdown by type", expanded=False):
+                    cb_df = pd.DataFrame(a_crime_breakdown)
+                    fig_crime = go.Figure(go.Bar(
+                        x=cb_df["count"],
+                        y=cb_df["crime_against"],
+                        orientation="h",
+                        marker_color=CHART_COLOR,
+                        text=cb_df["count"],
+                        textposition="outside",
+                    ))
+                    fig_crime.update_layout(
+                        height=150,
+                        margin=dict(l=0, r=40, t=0, b=0),
+                        yaxis=dict(autorange="reversed"),
+                        xaxis_title="incidents",
+                    )
+                    st.plotly_chart(fig_crime, use_container_width=True,
+                                    key=f"crime_bd_a_{selected_area}")
+
+            # Permit timelines
+            a_permit_timelines = _a_civic.get("permit_timelines", [])
+            if a_permit_timelines:
+                with st.expander("permit approval speed", expanded=False):
+                    pt_df = pd.DataFrame(a_permit_timelines)
+                    st.dataframe(pt_df, use_container_width=True, hide_index=True)
+
+            # 311 service breakdown (city-wide)
+            with st.expander("311 service breakdown (city-wide)", expanded=False):
+                services = _load_311_services()
+                if services:
+                    svc_df = pd.DataFrame(services[:15])
+                    st.dataframe(svc_df, use_container_width=True, hide_index=True)
+
             st.divider()
 
             # Constituent zips table
@@ -817,6 +1011,54 @@ with tab_explorer:
                                 key=f"area_cat_chart_{selected_area}")
             else:
                 st.info("no business data available")
+
+            # Business age analysis
+            a_business_age = area_profile.get("business_age", [])
+            if a_business_age:
+                st.subheader("business maturity")
+                ba_df = pd.DataFrame(a_business_age)
+
+                def _maturity_area(years):
+                    if not _valid(years):
+                        return ""
+                    y = float(years)
+                    if y < 2:
+                        return "emerging"
+                    elif y < 5:
+                        return "growing"
+                    elif y < 8:
+                        return "maturing"
+                    return "established"
+
+                ba_df["maturity"] = ba_df["median_age_years"].apply(_maturity_area)
+
+                color_map = {
+                    "emerging": "#4CAF50",
+                    "growing": "#8BC34A",
+                    "maturing": "#FFC107",
+                    "established": "#FF9800",
+                }
+                colors = [color_map.get(m, CHART_COLOR) for m in ba_df["maturity"]]
+
+                fig_age = go.Figure(go.Bar(
+                    x=ba_df["median_age_years"],
+                    y=ba_df["category"],
+                    orientation="h",
+                    marker_color=colors,
+                    text=ba_df.apply(
+                        lambda r: f"{r['median_age_years']:.1f} yr ({r['maturity']})",
+                        axis=1,
+                    ),
+                    textposition="outside",
+                ))
+                fig_age.update_layout(
+                    height=max(200, len(ba_df) * 35),
+                    margin=dict(l=0, r=80, t=0, b=0),
+                    yaxis=dict(autorange="reversed"),
+                    xaxis_title="median age (years)",
+                )
+                st.plotly_chart(fig_age, use_container_width=True,
+                                key=f"biz_age_a_{selected_area}")
 
     # ── Area mode: drilled into a zip ──
     elif level == "area" and selected_area and drilldown_zip:
@@ -1017,12 +1259,14 @@ with tab_rankings:
         "median home value", "% bachelor's+", "active businesses",
         "businesses per 1k", "new permits",
         "crime count", "311 median days", "solar installs",
+        "momentum score",
     ]
     _base_metric_keys = [
         "population", "median_income", "median_age", "median_rent",
         "median_home_value", "pct_bachelors_plus", "active_count",
         "businesses_per_1k", "new_permits",
         "crime_count", "median_311_days", "solar_installs",
+        "momentum_score",
     ]
 
     if level == "area":
