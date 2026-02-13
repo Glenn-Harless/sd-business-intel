@@ -244,6 +244,12 @@ def _load_map_layer(layer: str, zip_code: str | None = None,
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=3600)
+def _load_city_trends() -> dict:
+    """Load city-wide per-zip average trends for chart comparison lines."""
+    return queries.get_city_trends()
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -520,6 +526,74 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
         layers=layers,
         map_style="mapbox://styles/mapbox/light-v11",
     ))
+
+
+def _render_trend_charts(zip_code: str | None = None, area: str | None = None,
+                          key_prefix: str = "trends"):
+    """Render trend line charts with city per-zip average comparison."""
+    trends = _load_trends(zip_code=zip_code, area=area)
+    city_trends = _load_city_trends()
+
+    if not trends:
+        return
+
+    label = zip_code or area or "selected"
+
+    chart_configs = [
+        ("business_formation", "business formation"),
+        ("permits", "construction permits"),
+        ("crime", "crime incidents"),
+        ("solar", "solar installations"),
+    ]
+
+    first = True
+    for series_key, series_label in chart_configs:
+        data = trends.get(series_key, [])
+        if not data:
+            continue
+
+        city_data = city_trends.get(series_key, [])
+
+        years = [d["year"] for d in data]
+        counts = [d["count"] for d in data]
+        year_range = f"{min(years)}-{max(years)}" if years else ""
+
+        with st.expander(f"{series_label} ({year_range})", expanded=first):
+            fig = go.Figure()
+
+            # Primary line: selected zip/area
+            fig.add_trace(go.Scatter(
+                x=years, y=counts,
+                mode="lines+markers",
+                name=label,
+                line=dict(color=CHART_COLOR, width=2),
+                hovertemplate="%{x}: %{y:,.0f}<extra></extra>",
+            ))
+
+            # City per-zip average line (same y-axis for direct comparison)
+            if city_data:
+                city_years = [d["year"] for d in city_data]
+                city_counts = [d["count"] for d in city_data]
+                fig.add_trace(go.Scatter(
+                    x=city_years, y=city_counts,
+                    mode="lines",
+                    name="city avg per zip",
+                    line=dict(color="#999", width=1, dash="dash"),
+                    hovertemplate="%{x}: %{y:,.0f}<extra></extra>",
+                ))
+
+            fig.update_layout(
+                height=250,
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis_title="year",
+                yaxis_title="count",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig, use_container_width=True,
+                            key=f"trend_{series_key}_{key_prefix}")
+
+        first = False
 
 
 def _flat_profile(p):
@@ -939,6 +1013,10 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
     st.subheader("map")
     _render_map(zip_code=zip_code, key_prefix=key_prefix)
 
+    st.divider()
+    st.subheader("trends")
+    _render_trend_charts(zip_code=zip_code, key_prefix=f"zip_{key_prefix}_{zip_code}")
+
 
 # ══════════════════════════════════════════════════════════════
 # Tabs
@@ -1094,6 +1172,10 @@ with tab_explorer:
             st.divider()
             st.subheader("map")
             _render_map(area=selected_area, key_prefix=f"area_{selected_area}")
+
+            st.divider()
+            st.subheader("trends")
+            _render_trend_charts(area=selected_area, key_prefix=f"area_{selected_area}")
 
             st.divider()
 
