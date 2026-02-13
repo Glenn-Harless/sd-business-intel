@@ -21,6 +21,14 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["pipeline", "api", "dashboard"]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
