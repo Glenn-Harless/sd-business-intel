@@ -1439,3 +1439,235 @@ def get_311_services() -> list[dict]:
         ORDER BY total_requests DESC
     """)
     return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+# ── Phase 3: Spatial & Competitive Analysis ──
+
+
+def get_zip_centroids() -> dict[str, tuple[float, float]]:
+    """Load zip centroids as {zip_code: (lat, lng)} dict."""
+    path = _AGG / "zip_centroids.parquet"
+    if not path.exists():
+        return {}
+    rows = _run(f"SELECT zip_code, lat, lng FROM '{path}'")
+    return {r["zip_code"]: (r["lat"], r["lng"]) for r in rows}
+
+
+def get_map_points(
+    layer: str,
+    zip_code: str | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    limit: int = 50000,
+) -> list[dict]:
+    """Get lat/lng points for a map layer, optionally filtered by location and time."""
+    layer_map = {
+        "311": ("map_311.parquet", "request_year", "lng"),
+        "permits": ("map_permits.parquet", "approval_year", "lng"),
+        "crime": ("map_crime.parquet", "year", "lng"),
+        "solar": ("map_solar.parquet", "year", "lng"),
+    }
+    if layer not in layer_map:
+        return []
+
+    filename, year_col, lng_col = layer_map[layer]
+    path = _q(f"data/aggregated/{filename}")
+
+    clauses = []
+    params = []
+    idx = 1
+
+    if year_min is not None:
+        clauses.append(f"{year_col} >= ${idx}")
+        params.append(year_min)
+        idx += 1
+    if year_max is not None:
+        clauses.append(f"{year_col} <= ${idx}")
+        params.append(year_max)
+        idx += 1
+
+    # Spatial filter: if zip_code provided, filter to bounding box around zip centroid.
+    # This is a SEPARATE query (via _run_one), so it always uses $1.
+    if zip_code:
+        centroid_path = _q("data/aggregated/zip_centroids.parquet")
+        centroid = _run_one(
+            f"SELECT lat, lng FROM '{centroid_path}' WHERE zip_code = $1",
+            [zip_code],
+        )
+        if centroid and centroid.get("lat"):
+            lat, lng = float(centroid["lat"]), float(centroid["lng"])
+            # ~3 mile bounding box (0.05 degrees lat/lng)
+            clauses.append(f"lat BETWEEN {lat - 0.05} AND {lat + 0.05}")
+            clauses.append(f"{lng_col} BETWEEN {lng - 0.05} AND {lng + 0.05}")
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"SELECT * FROM '{path}' {where} LIMIT {min(limit, 100000)}"
+    return _run(sql, params if params else None)
+
+
+def get_city_trends() -> dict:
+    """Get city-wide per-zip average time-series for all trend metrics.
+
+    Returns average-per-zip values (not city totals) so charts can
+    compare a single zip against the typical zip on the same y-axis.
+    """
+    trends = {}
+
+    tbf_path = _AGG / "trend_business_formation.parquet"
+    if tbf_path.exists():
+        rows = _run(f"""
+            SELECT year,
+                   ROUND(SUM(new_businesses) * 1.0 / COUNT(DISTINCT zip_code), 1) AS count
+            FROM '{tbf_path}'
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["business_formation"] = rows
+
+    cp_path = _AGG / "civic_permits.parquet"
+    if cp_path.exists():
+        rows = _run(f"""
+            SELECT year,
+                   ROUND(SUM(permit_count) * 1.0 / COUNT(DISTINCT zip_code), 1) AS count
+            FROM '{cp_path}'
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["permits"] = rows
+
+    cc_path = _AGG / "civic_crime.parquet"
+    if cc_path.exists():
+        rows = _run(f"""
+            SELECT year,
+                   ROUND(SUM(count) * 1.0 / COUNT(DISTINCT zip_code), 1) AS count
+            FROM '{cc_path}'
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["crime"] = rows
+
+    cs_path = _AGG / "civic_solar.parquet"
+    if cs_path.exists():
+        rows = _run(f"""
+            SELECT year,
+                   ROUND(SUM(solar_count) * 1.0 / COUNT(DISTINCT zip_code), 1) AS count
+            FROM '{cs_path}'
+            GROUP BY year ORDER BY year
+        """)
+        _add_yoy(rows)
+        trends["solar"] = rows
+
+    return trends
+
+
+def get_competitors(category: str, zip_code: str) -> dict:
+    """Get competitor businesses in a category for a zip code + nearby context."""
+    biz_path = _PROCESSED / "businesses.parquet"
+    if not biz_path.exists():
+        return {"businesses": [], "nearby_zips": [], "density": None, "city_avg_density": None}
+
+    # Businesses in this category + zip
+    businesses = _run(f"""
+        SELECT business_name, address, zip_code, start_date, status
+        FROM '{biz_path}'
+        WHERE category = $1 AND zip_code = $2 AND status = 'active'
+        ORDER BY business_name
+    """, [category, zip_code])
+
+    # Population for density
+    np_path = _q("data/aggregated/neighborhood_profile.parquet")
+    pop_row = _run_one(f"SELECT population FROM '{np_path}' WHERE zip_code = $1", [zip_code])
+    population = pop_row.get("population") if pop_row else None
+
+    density = None
+    if population and population > 0:
+        density = round(1000.0 * len(businesses) / population, 2)
+
+    # City avg density for this category (total/total method)
+    bz_path = _q("data/aggregated/business_by_zip.parquet")
+    demo_path = _q("data/aggregated/demographics_by_zip.parquet")
+    city_avg_row = _run_one(f"""
+        SELECT ROUND(1000.0 * SUM(bz.active_count) / NULLIF(
+            (SELECT SUM(population) FROM '{demo_path}'), 0
+        ), 2) AS city_avg_density
+        FROM '{bz_path}' bz
+        WHERE bz.category = $1
+          AND bz.zip_code IN (SELECT zip_code FROM '{demo_path}')
+    """, [category])
+    city_avg_density = _clean(city_avg_row.get("city_avg_density")) if city_avg_row else None
+
+    # Nearby zips: geographically close (within ~0.1 deg / ~7 miles)
+    centroid_path = _q("data/aggregated/zip_centroids.parquet")
+    nearby = _run(f"""
+        WITH center AS (
+            SELECT lat, lng FROM '{centroid_path}' WHERE zip_code = $2
+        )
+        SELECT bz.zip_code, np.neighborhood, bz.active_count,
+               CASE WHEN np.population > 0
+                    THEN ROUND(1000.0 * bz.active_count / np.population, 2)
+                    ELSE NULL END AS per_1k
+        FROM '{bz_path}' bz
+        JOIN '{np_path}' np ON bz.zip_code = np.zip_code
+        JOIN '{centroid_path}' zc ON bz.zip_code = zc.zip_code
+        CROSS JOIN center c
+        WHERE bz.category = $1
+          AND bz.active_count > 0
+          AND ABS(zc.lat - c.lat) <= 0.1
+          AND ABS(zc.lng - c.lng) <= 0.1
+        ORDER BY bz.active_count DESC
+        LIMIT 20
+    """, [category, zip_code])
+
+    return {
+        "zip_code": zip_code,
+        "category": category,
+        "count": len(businesses),
+        "businesses": businesses,
+        "density": density,
+        "city_avg_density": city_avg_density,
+        "nearby_zips": [{k: _clean(v) for k, v in n.items()} for n in nearby],
+    }
+
+
+def get_crime_detail(year: int | None = None) -> list[dict]:
+    """Get city-wide offense group breakdown."""
+    path = _q("data/aggregated/civic_crime_detail.parquet")
+    if year:
+        rows = _run(f"""
+            SELECT offense_group, crime_against, SUM(count) AS count
+            FROM '{path}'
+            WHERE year = $1
+            GROUP BY offense_group, crime_against
+            ORDER BY count DESC
+        """, [year])
+    else:
+        rows = _run(f"""
+            SELECT offense_group, crime_against, SUM(count) AS count
+            FROM '{path}'
+            WHERE year = (SELECT MAX(year) FROM '{path}')
+            GROUP BY offense_group, crime_against
+            ORDER BY count DESC
+        """)
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_crime_temporal(year: int | None = None) -> list[dict]:
+    """Get day-of-week x month crime patterns (city-wide)."""
+    path = _q("data/aggregated/civic_crime_temporal.parquet")
+    if year:
+        rows = _run(f"""
+            SELECT dow, month, crime_against, SUM(count) AS count
+            FROM '{path}'
+            WHERE year = $1
+            GROUP BY dow, month, crime_against
+            ORDER BY dow, month
+        """, [year])
+    else:
+        rows = _run(f"""
+            SELECT dow, month, crime_against, SUM(count) AS count
+            FROM '{path}'
+            WHERE year = (SELECT MAX(year) FROM '{path}')
+            GROUP BY dow, month, crime_against
+            ORDER BY dow, month
+        """)
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
