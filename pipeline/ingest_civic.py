@@ -18,6 +18,9 @@ CIVIC_SOURCES: dict[str, str] = {
     "sd-get-it-done/data/aggregated/response_by_neighborhood.parquet": "civic_311.parquet",
     "sd-get-it-done/data/aggregated/monthly_trends.parquet": "civic_311_monthly.parquet",
     "sd-homelessness/data/aggregated/pit_geography.parquet": "civic_homelessness.parquet",
+    "sd-get-it-done/data/aggregated/top_problem_types.parquet": "civic_311_services.parquet",
+    "sd-housing-permits/data/aggregated/approval_timelines.parquet": "civic_permit_timelines.parquet",
+    "sd-climate-action/data/aggregated/energy_by_zip_annual.parquet": "civic_energy.parquet",
 }
 
 
