@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FilterOptions(BaseModel):
@@ -232,3 +232,26 @@ class AreaZipSummary(BaseModel):
     median_income: int | None = None
     crime_count: int | None = None
     new_permits: int | None = None
+
+
+class CompetitorResult(BaseModel):
+    zip_code: str
+    category: str
+    count: int
+    businesses: list[dict] = Field(default_factory=list)
+    density: float | None = None
+    city_avg_density: float | None = None
+    nearby_zips: list[dict] = Field(default_factory=list)
+
+
+class CrimeDetail(BaseModel):
+    offense_group: str
+    crime_against: str
+    count: int
+
+
+class CrimeTemporal(BaseModel):
+    dow: int
+    month: int
+    crime_against: str
+    count: int

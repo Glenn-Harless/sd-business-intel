@@ -115,6 +115,13 @@ def get_health() -> dict:
         "civic_crime": _AGG / "civic_crime.parquet",
         "civic_311": _AGG / "civic_311.parquet",
         "civic_homelessness": _AGG / "civic_homelessness.parquet",
+        "map_311": _AGG / "map_311.parquet",
+        "map_permits": _AGG / "map_permits.parquet",
+        "map_crime": _AGG / "map_crime.parquet",
+        "map_solar": _AGG / "map_solar.parquet",
+        "zip_centroids": _AGG / "zip_centroids.parquet",
+        "civic_crime_detail": _AGG / "civic_crime_detail.parquet",
+        "civic_crime_temporal": _AGG / "civic_crime_temporal.parquet",
     }
 
     status = {}
