@@ -256,6 +256,18 @@ def _load_competitors(category: str, zip_code: str) -> dict:
     return queries.get_competitors(category, zip_code)
 
 
+@st.cache_data(ttl=3600)
+def _load_crime_detail(year: int | None = None) -> list[dict]:
+    """Load city-wide crime detail by offense group."""
+    return queries.get_crime_detail(year)
+
+
+@st.cache_data(ttl=3600)
+def _load_crime_temporal(year: int | None = None) -> list[dict]:
+    """Load crime temporal patterns (day x month)."""
+    return queries.get_crime_temporal(year)
+
+
 # Metric -> sense for badge phrasing in _show_rank.
 # "high" = higher is good, "low" = lower is good, "neutral" = no judgement.
 _RANK_SENSE = {
@@ -602,6 +614,75 @@ def _render_trend_charts(zip_code: str | None = None, area: str | None = None,
         first = False
 
 
+def _render_crime_detail(key_prefix: str):
+    """Render city-wide crime detail and temporal pattern expanders."""
+    # City-wide crime types
+    with st.expander("city-wide crime types (detailed)", expanded=False):
+        detail = _load_crime_detail()
+        if detail:
+            det_df = pd.DataFrame(detail)
+            fig_det = go.Figure(go.Bar(
+                x=det_df["count"],
+                y=det_df["offense_group"],
+                orientation="h",
+                marker_color=[
+                    "#ff6b6b" if r.get("crime_against") == "Person"
+                    else CHART_COLOR if r.get("crime_against") == "Property"
+                    else "#ffa500"
+                    for r in detail
+                ],
+                text=det_df.apply(
+                    lambda r: f"{int(r['count']):,}  ({r['crime_against']})", axis=1
+                ),
+                textposition="outside",
+            ))
+            fig_det.update_layout(
+                height=max(400, len(det_df) * 22),
+                margin=dict(l=0, r=100, t=0, b=0),
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="incidents",
+            )
+            st.plotly_chart(fig_det, use_container_width=True,
+                            key=f"crime_det_{key_prefix}")
+        else:
+            st.info("city-wide crime detail not available")
+
+    # Temporal patterns
+    with st.expander("when does crime happen? (city-wide)", expanded=False):
+        temporal = _load_crime_temporal()
+        if temporal:
+            t_df = pd.DataFrame(temporal)
+            # Aggregate across crime_against for the heatmap
+            heatmap_df = t_df.groupby(["dow", "month"])["count"].sum().reset_index()
+
+            # Pivot for heatmap
+            pivot = heatmap_df.pivot(index="dow", columns="month", values="count").fillna(0)
+
+            dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            # Ensure all dow/month values present
+            pivot = pivot.reindex(index=range(0, 7), columns=range(1, 13), fill_value=0)
+
+            fig_heat = go.Figure(go.Heatmap(
+                z=pivot.values,
+                x=month_labels,
+                y=dow_labels,
+                colorscale="YlOrRd",
+                hovertemplate="%{y}, %{x}: %{z:,} incidents<extra></extra>",
+            ))
+            fig_heat.update_layout(
+                height=250,
+                margin=dict(l=0, r=0, t=0, b=0),
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True,
+                            key=f"crime_temp_{key_prefix}")
+        else:
+            st.info("crime temporal data not available")
+
+
 def _flat_profile(p):
     """Flatten a nested profile dict for metric access."""
     flat = {}
@@ -866,6 +947,8 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
             )
             st.plotly_chart(fig_crime, use_container_width=True,
                             key=f"crime_bd_{key_prefix}_{zip_code}")
+
+    _render_crime_detail(f"{key_prefix}_{zip_code}")
 
     # Permit timelines
     permit_timelines = _civic.get("permit_timelines", [])
@@ -1136,6 +1219,8 @@ with tab_explorer:
                     )
                     st.plotly_chart(fig_crime, use_container_width=True,
                                     key=f"crime_bd_a_{selected_area}")
+
+            _render_crime_detail(f"area_{selected_area}")
 
             # Permit timelines
             a_permit_timelines = _a_civic.get("permit_timelines", [])
