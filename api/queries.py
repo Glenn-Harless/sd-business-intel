@@ -244,6 +244,52 @@ def get_neighborhood_profile(zip_code: str) -> dict:
 
     con.close()
 
+    # Crime breakdown by type for this zip (latest year)
+    crime_path = _q("data/aggregated/civic_crime.parquet")
+    crime_breakdown = _run(f"""
+        SELECT crime_against, SUM(count) AS count
+        FROM '{crime_path}'
+        WHERE zip_code = $1 AND year = (SELECT MAX(year) FROM '{crime_path}' WHERE zip_code = $1)
+        GROUP BY crime_against
+        ORDER BY count DESC
+    """, [zip_code])
+
+    # Energy benchmark (latest year)
+    energy_path = _q("data/aggregated/civic_energy.parquet")
+    energy = _run_one(f"""
+        SELECT avg_kwh_per_customer, total_kwh, elec_customers
+        FROM '{energy_path}'
+        WHERE zip_code = $1
+        ORDER BY year DESC LIMIT 1
+    """, [zip_code])
+
+    # Permit approval timelines (latest year with data, top 3 types)
+    pt_path = _q("data/aggregated/civic_permit_timelines.parquet")
+    permit_timelines = _run(f"""
+        SELECT approval_type_clean AS permit_type, permit_count,
+               ROUND(median_days, 0) AS median_days
+        FROM '{pt_path}'
+        WHERE zip_code = $1
+          AND year = (SELECT MAX(year) FROM '{pt_path}' WHERE zip_code = $1 AND permit_count > 0)
+          AND permit_count > 0
+        ORDER BY permit_count DESC
+        LIMIT 3
+    """, [zip_code])
+
+    # Momentum score
+    mom_path = _q("data/aggregated/momentum_scores.parquet")
+    momentum = _run_one(f"SELECT * FROM '{mom_path}' WHERE zip_code = $1", [zip_code])
+
+    # Business age stats (top 5 categories)
+    age_path = _q("data/aggregated/business_age_stats.parquet")
+    age_stats = _run(f"""
+        SELECT category, business_count, median_age_years, avg_age_years,
+               pct_under_2yr, pct_over_10yr
+        FROM '{age_path}'
+        WHERE zip_code = $1
+        ORDER BY business_count DESC LIMIT 5
+    """, [zip_code])
+
     # build comparison
     comparison = {}
     compare_fields = [
@@ -291,9 +337,14 @@ def get_neighborhood_profile(zip_code: str) -> dict:
             "crime_count": _clean(row.get("crime_count")),
             "median_311_days": _clean(row.get("median_311_days")),
             "total_311_requests": _clean(row.get("total_311_requests")),
+            "crime_breakdown": [{k: _clean(v) for k, v in c.items()} for c in crime_breakdown],
+            "energy": {k: _clean(v) for k, v in energy.items()} if energy else None,
+            "permit_timelines": [{k: _clean(v) for k, v in p.items()} for p in permit_timelines],
         },
         "comparison_to_avg": comparison,
         "percentiles": percentiles,
+        "momentum": {k: _clean(v) for k, v in momentum.items()} if momentum else None,
+        "business_age": [{k: _clean(v) for k, v in a.items()} for a in age_stats],
         "narrative": _build_narrative(row, avg),
         "data_as_of": get_health().get("data_as_of"),
     }
@@ -836,6 +887,67 @@ def get_area_profile(area: str) -> dict:
 
     zip_codes = row.get("zip_codes", [])
 
+    # Crime breakdown — aggregate across area's zips
+    crime_path = _q("data/aggregated/civic_crime.parquet")
+    np_path = _q("data/aggregated/neighborhood_profile.parquet")
+    crime_breakdown = _run(f"""
+        WITH area_zips AS (
+            SELECT zip_code FROM '{np_path}' WHERE area = $1
+        )
+        SELECT crime_against, SUM(count) AS count
+        FROM '{crime_path}'
+        WHERE zip_code IN (SELECT zip_code FROM area_zips)
+          AND year = (SELECT MAX(year) FROM '{crime_path}')
+        GROUP BY crime_against
+        ORDER BY count DESC
+    """, [area])
+
+    # Energy benchmark — average across area zips (latest year)
+    energy_path = _q("data/aggregated/civic_energy.parquet")
+    energy = _run_one(f"""
+        WITH area_zips AS (
+            SELECT zip_code FROM '{np_path}' WHERE area = $1
+        )
+        SELECT ROUND(AVG(avg_kwh_per_customer), 0) AS avg_kwh_per_customer,
+               SUM(total_kwh) AS total_kwh,
+               SUM(elec_customers) AS elec_customers
+        FROM '{energy_path}'
+        WHERE zip_code IN (SELECT zip_code FROM area_zips)
+          AND year = (SELECT MAX(year) FROM '{energy_path}')
+    """, [area])
+
+    # Permit timelines — aggregate across area zips
+    pt_path = _q("data/aggregated/civic_permit_timelines.parquet")
+    permit_timelines = _run(f"""
+        WITH area_zips AS (
+            SELECT zip_code FROM '{np_path}' WHERE area = $1
+        )
+        SELECT approval_type_clean AS permit_type,
+               SUM(permit_count) AS permit_count,
+               ROUND(AVG(median_days), 0) AS median_days
+        FROM '{pt_path}'
+        WHERE zip_code IN (SELECT zip_code FROM area_zips)
+          AND year = (SELECT MAX(year) FROM '{pt_path}' WHERE permit_count > 0)
+          AND permit_count > 0
+        GROUP BY approval_type_clean
+        ORDER BY permit_count DESC
+        LIMIT 3
+    """, [area])
+
+    # Momentum score (area-level)
+    mom_path = _q("data/aggregated/momentum_by_area.parquet")
+    momentum = _run_one(f"SELECT * FROM '{mom_path}' WHERE area = $1", [area])
+
+    # Business age (area-level)
+    age_path = _q("data/aggregated/business_age_by_area.parquet")
+    age_stats = _run(f"""
+        SELECT category, business_count, median_age_years, avg_age_years,
+               pct_under_2yr, pct_over_10yr
+        FROM '{age_path}'
+        WHERE area = $1
+        ORDER BY business_count DESC LIMIT 5
+    """, [area])
+
     return {
         "area": row.get("area"),
         "zip_codes": zip_codes if isinstance(zip_codes, list) else [],
@@ -861,8 +973,13 @@ def get_area_profile(area: str) -> dict:
             "crime_count": _clean(row.get("crime_count")),
             "median_311_days": _clean(row.get("median_311_days")),
             "total_311_requests": _clean(row.get("total_311_requests")),
+            "crime_breakdown": [{k: _clean(v) for k, v in c.items()} for c in crime_breakdown],
+            "energy": {k: _clean(v) for k, v in energy.items()} if energy else None,
+            "permit_timelines": [{k: _clean(v) for k, v in p.items()} for p in permit_timelines],
         },
         "comparison_to_avg": comparison,
+        "momentum": {k: _clean(v) for k, v in momentum.items()} if momentum else None,
+        "business_age": [{k: _clean(v) for k, v in a.items()} for a in age_stats],
         "narrative": _build_area_narrative(row, avg),
     }
 
@@ -1126,3 +1243,62 @@ def _add_yoy(rows: list[dict]) -> None:
             )
         row["count"] = _clean(row["count"])
         row["year"] = _clean(row["year"])
+
+
+# ── Momentum, business age, 311 service queries ──
+
+
+def get_momentum_scores(limit: int = 20) -> list[dict]:
+    """Get zip codes ranked by momentum score."""
+    path = _q("data/aggregated/momentum_scores.parquet")
+    rows = _run(f"SELECT * FROM '{path}' ORDER BY momentum_score DESC LIMIT $1", [min(limit, 100)])
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_area_momentum(limit: int = 20) -> list[dict]:
+    """Get areas ranked by momentum score."""
+    path = _q("data/aggregated/momentum_by_area.parquet")
+    rows = _run(f"SELECT * FROM '{path}' ORDER BY momentum_score DESC LIMIT $1", [min(limit, 100)])
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_business_age(zip_code: str) -> list[dict]:
+    """Get business age stats by category for a zip code."""
+    path = _q("data/aggregated/business_age_stats.parquet")
+    rows = _run(f"""
+        SELECT category, business_count, median_age_years, avg_age_years,
+               pct_under_2yr, pct_over_10yr
+        FROM '{path}'
+        WHERE zip_code = $1
+        ORDER BY business_count DESC
+        LIMIT 15
+    """, [zip_code])
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_area_business_age(area: str) -> list[dict]:
+    """Get business age stats by category for an area."""
+    path = _q("data/aggregated/business_age_by_area.parquet")
+    rows = _run(f"""
+        SELECT category, business_count, median_age_years, avg_age_years,
+               pct_under_2yr, pct_over_10yr
+        FROM '{path}'
+        WHERE area = $1
+        ORDER BY business_count DESC
+        LIMIT 15
+    """, [area])
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
+
+
+def get_311_services() -> list[dict]:
+    """Get city-wide 311 service type breakdown."""
+    path = _q("data/aggregated/civic_311_services.parquet")
+    rows = _run(f"""
+        SELECT service_name, total_requests, closed_requests,
+               ROUND(avg_resolution_days, 1) AS avg_resolution_days,
+               ROUND(median_resolution_days, 1) AS median_resolution_days,
+               ROUND(close_rate_pct, 1) AS close_rate_pct
+        FROM '{path}'
+        ORDER BY total_requests DESC
+    """)
+    return [{k: _clean(v) for k, v in r.items()} for r in rows]
