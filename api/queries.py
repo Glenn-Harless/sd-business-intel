@@ -1466,8 +1466,17 @@ def get_map_points(
     year_min: int | None = None,
     year_max: int | None = None,
     limit: int = 50000,
+    center_lat: float | None = None,
+    center_lng: float | None = None,
+    bbox_deg: float = 0.05,
 ) -> list[dict]:
-    """Get lat/lng points for a map layer, optionally filtered by location and time."""
+    """Get lat/lng points for a map layer, optionally filtered by location and time.
+
+    Spatial filter priority:
+    1. If center_lat/center_lng provided, use those with bbox_deg
+    2. If zip_code provided, look up centroid and use 0.05 deg bbox
+    3. Otherwise, no spatial filter
+    """
     layer_map = {
         "311": ("map_311.parquet", "request_year", "lng"),
         "permits": ("map_permits.parquet", "approval_year", "lng"),
@@ -1493,9 +1502,11 @@ def get_map_points(
         params.append(year_max)
         idx += 1
 
-    # Spatial filter: if zip_code provided, filter to bounding box around zip centroid.
-    # This is a SEPARATE query (via _run_one), so it always uses $1.
-    if zip_code:
+    # Spatial filter: explicit center takes priority over zip_code lookup
+    if center_lat is not None and center_lng is not None:
+        clauses.append(f"lat BETWEEN {center_lat - bbox_deg} AND {center_lat + bbox_deg}")
+        clauses.append(f"{lng_col} BETWEEN {center_lng - bbox_deg} AND {center_lng + bbox_deg}")
+    elif zip_code:
         centroid_path = _q("data/aggregated/zip_centroids.parquet")
         centroid = _run_one(
             f"SELECT lat, lng FROM '{centroid_path}' WHERE zip_code = $1",
@@ -1503,7 +1514,6 @@ def get_map_points(
         )
         if centroid and centroid.get("lat"):
             lat, lng = float(centroid["lat"]), float(centroid["lng"])
-            # ~3 mile bounding box (0.05 degrees lat/lng)
             clauses.append(f"lat BETWEEN {lat - 0.05} AND {lat + 0.05}")
             clauses.append(f"{lng_col} BETWEEN {lng - 0.05} AND {lng + 0.05}")
 

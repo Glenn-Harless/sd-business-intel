@@ -236,9 +236,14 @@ def _load_311_services():
 
 @st.cache_data(ttl=3600)
 def _load_map_layer(layer: str, zip_code: str | None = None,
-                     year_min: int | None = None, year_max: int | None = None):
+                     year_min: int | None = None, year_max: int | None = None,
+                     center_lat: float | None = None, center_lng: float | None = None,
+                     bbox_deg: float = 0.05):
     """Load map points for a layer, filtered by location and time."""
-    rows = queries.get_map_points(layer, zip_code, year_min, year_max, limit=80000)
+    rows = queries.get_map_points(
+        layer, zip_code, year_min, year_max, limit=80000,
+        center_lat=center_lat, center_lng=center_lng, bbox_deg=bbox_deg,
+    )
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
@@ -413,9 +418,11 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
     Area mode: centers on average of constituent zip centroids, zoom 11.
     Zip mode: centers on zip centroid, zoom 13.
     """
-    # Determine center and zoom
+    # Determine center, zoom, and spatial filter params
+    area_bbox_deg = None
+    filter_zip = None
     if area and not zip_code:
-        # Area mode: average constituent zip centroids
+        # Area mode: compute bounding box from all constituent zip centroids
         area_zips_data = queries.get_area_zips(area)
         area_zip_codes = [z["zip_code"] for z in area_zips_data] if area_zips_data else []
         lats, lngs = [], []
@@ -427,11 +434,15 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
         if lats:
             center_lat = sum(lats) / len(lats)
             center_lng = sum(lngs) / len(lngs)
+            # Bbox covers all constituent zips plus padding
+            area_bbox_deg = max(
+                max(lats) - min(lats),
+                max(lngs) - min(lngs),
+            ) / 2 + 0.02  # half-span + padding
         else:
             center_lat, center_lng = 32.7157, -117.1611
+            area_bbox_deg = 0.08
         zoom = 11
-        # Use first constituent zip for spatial filtering (wider bbox in query)
-        filter_zip = area_zip_codes[0] if area_zip_codes else None
     else:
         center_lat, center_lng = ZIP_COORDS.get(zip_code, (32.7157, -117.1611))
         zoom = 13
@@ -462,10 +473,16 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
         key=f"map_year_{key_prefix}_{key_id}",
     )
 
+    # Spatial filter kwargs: area mode uses explicit center+bbox, zip mode uses zip_code
+    spatial_kw: dict = {}
+    if area_bbox_deg is not None:
+        spatial_kw = {"center_lat": center_lat, "center_lng": center_lng,
+                      "bbox_deg": area_bbox_deg}
+
     layers = []
 
     if show_311:
-        df_311 = _load_map_layer("311", filter_zip, yr_min, yr_max)
+        df_311 = _load_map_layer("311", filter_zip, yr_min, yr_max, **spatial_kw)
         if not df_311.empty:
             layers.append(pdk.Layer(
                 "HexagonLayer",
@@ -487,7 +504,7 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
             ))
 
     if show_permits:
-        df_permits = _load_map_layer("permits", filter_zip, yr_min, yr_max)
+        df_permits = _load_map_layer("permits", filter_zip, yr_min, yr_max, **spatial_kw)
         if not df_permits.empty:
             # Color by type: solar=green, other=blue
             df_permits = df_permits.copy()
@@ -510,7 +527,7 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
             ))
 
     if show_crime:
-        df_crime = _load_map_layer("crime", filter_zip, yr_min, yr_max)
+        df_crime = _load_map_layer("crime", filter_zip, yr_min, yr_max, **spatial_kw)
         if not df_crime.empty:
             layers.append(pdk.Layer(
                 "HexagonLayer",
@@ -531,7 +548,7 @@ def _render_map(zip_code: str | None = None, area: str | None = None,
             ))
 
     if show_solar:
-        df_solar = _load_map_layer("solar", filter_zip, yr_min, yr_max)
+        df_solar = _load_map_layer("solar", filter_zip, yr_min, yr_max, **spatial_kw)
         if not df_solar.empty:
             layers.append(pdk.Layer(
                 "ScatterplotLayer",
