@@ -1134,6 +1134,30 @@ def _render_zip_explorer(profile, _demo, _biz, _civic, percentiles, zip_code,
 
 
 # ══════════════════════════════════════════════════════════════
+# Header
+# ══════════════════════════════════════════════════════════════
+st.title("sd business intel")
+st.caption(
+    "location intelligence for san diego entrepreneurs. "
+    "cross-references 51,000+ business tax certificates, census demographics, "
+    "and 4.8 million civic data points (311 requests, permits, crime, solar) "
+    "to help you evaluate where to open a business."
+)
+
+with st.expander("how to use this dashboard", expanded=False):
+    st.markdown("""
+**pick a location** in the sidebar — explore by area (e.g. north park, la jolla) or by zip code.
+
+**four tabs to explore:**
+- **explorer** — full neighborhood profile: demographics, business landscape, civic signals, interactive maps, and year-over-year trends
+- **compare** — side-by-side comparison of two zip codes across all metrics
+- **rankings** — rank all san diego zip codes or areas by any metric (income, business density, crime, momentum, etc.)
+- **competitors** — pick a business category and see how many competitors are nearby, density vs city average, and a full business directory
+
+**maps** show civic activity hotspots — toggle layers (311, permits, crime, solar) and adjust the year range. brighter clusters = more activity.
+""")
+
+# ══════════════════════════════════════════════════════════════
 # Tabs
 # ══════════════════════════════════════════════════════════════
 tab_explorer, tab_compare, tab_rankings, tab_competitors = st.tabs(
