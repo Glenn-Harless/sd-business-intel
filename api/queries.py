@@ -1572,6 +1572,7 @@ def get_competitors(category: str, zip_code: str) -> dict:
         FROM '{biz_path}'
         WHERE category = $1 AND zip_code = $2 AND status = 'active'
         ORDER BY business_name
+        LIMIT 500
     """, [category, zip_code])
 
     # Population for density
