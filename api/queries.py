@@ -30,6 +30,7 @@ _PERCENTILE_METRICS = {
     "crime_count": "ASC",
     "median_311_days": "ASC",
     "solar_installs": "DESC",
+    "momentum_score": "DESC",
 }
 
 
@@ -208,8 +209,10 @@ def get_neighborhood_profile(zip_code: str) -> dict:
             avg = avg_rows.iloc[0].to_dict()
 
     # compute percentile ranks across all zips
+    # momentum_score lives in a separate parquet, handle it outside this loop
+    profile_metrics = {k: v for k, v in _PERCENTILE_METRICS.items() if k != "momentum_score"}
     rank_cols = []
-    for metric, direction in _PERCENTILE_METRICS.items():
+    for metric, direction in profile_metrics.items():
         rank_cols.append(
             f"RANK() OVER (ORDER BY {metric} {direction} NULLS LAST) AS {metric}_rank"
         )
@@ -229,7 +232,7 @@ def get_neighborhood_profile(zip_code: str) -> dict:
     percentiles = {}
     if not rank_df.empty:
         rr = rank_df.iloc[0]
-        for metric in _PERCENTILE_METRICS:
+        for metric in profile_metrics:
             if _clean(row.get(metric)) is None:
                 continue
             rank = int(rr[f"{metric}_rank"])
@@ -240,6 +243,31 @@ def get_neighborhood_profile(zip_code: str) -> dict:
                     "rank": rank,
                     "of": of,
                     "percentile": pctile,
+                }
+
+    # momentum_score percentile (from separate parquet)
+    mom_pctile_path = _AGG / "momentum_scores.parquet"
+    if mom_pctile_path.exists():
+        mom_rank_df = con.execute(
+            f"""
+            WITH ranked AS (
+                SELECT zip_code,
+                       RANK() OVER (ORDER BY momentum_score DESC NULLS LAST) AS ms_rank,
+                       COUNT(momentum_score) OVER () AS ms_of
+                FROM '{mom_pctile_path}'
+            )
+            SELECT * FROM ranked WHERE zip_code = $1
+            """,
+            [zip_code],
+        ).fetchdf()
+        if not mom_rank_df.empty:
+            ms_rank = int(mom_rank_df.iloc[0]["ms_rank"])
+            ms_of = int(mom_rank_df.iloc[0]["ms_of"])
+            if ms_rank <= ms_of:
+                percentiles["momentum_score"] = {
+                    "rank": ms_rank,
+                    "of": ms_of,
+                    "percentile": round(100 * (ms_of - ms_rank) / max(ms_of - 1, 1)),
                 }
 
     con.close()
@@ -310,6 +338,12 @@ def get_neighborhood_profile(zip_code: str) -> dict:
                 "city_avg": round(float(avg_val), 1),
                 "vs_avg_pct": round(100 * (float(local_val) - float(avg_val)) / float(avg_val), 1),
             }
+
+    # Enrich row for narrative
+    if momentum:
+        row["momentum_score"] = _clean(momentum.get("momentum_score"))
+    if age_stats:
+        row["top_business_age"] = age_stats[0]  # top category by business_count
 
     return {
         "zip_code": zip_code,
@@ -459,7 +493,26 @@ def _build_narrative(row: dict, avg: dict) -> str:
     if negatives:
         parts.append(", ".join(negatives))
 
-    return "compared to the avg sd zip code: " + " — but ".join(parts)
+    result = "compared to the avg sd zip code: " + " — but ".join(parts)
+
+    # Momentum
+    if row.get("momentum_score") is not None:
+        ms = row["momentum_score"]
+        if ms >= 60:
+            result += f". momentum score: {ms}/100 (strong growth trajectory)"
+        elif ms >= 40:
+            result += f". momentum score: {ms}/100 (moderate growth)"
+        else:
+            result += f". momentum score: {ms}/100 (slower growth period)"
+
+    # Business age
+    top_age = row.get("top_business_age")
+    if top_age:
+        cat = top_age["category"]
+        age = top_age["median_age_years"]
+        result += f". most common business type ({cat}) has median age of {age} years"
+
+    return result
 
 
 def _build_comparison_narrative(profile_a: dict, profile_b: dict) -> str:
@@ -612,7 +665,26 @@ def _build_area_narrative(row: dict, avg: dict) -> str:
         parts.append(f"but {neg_str}" if positives else neg_str)
 
     joined = " — ".join(parts)
-    return f"compared to the avg sd area: {prefix} has {joined}."
+    result = f"compared to the avg sd area: {prefix} has {joined}."
+
+    # Momentum
+    if row.get("momentum_score") is not None:
+        ms = row["momentum_score"]
+        if ms >= 60:
+            result += f" momentum score: {ms}/100 (strong growth trajectory)"
+        elif ms >= 40:
+            result += f" momentum score: {ms}/100 (moderate growth)"
+        else:
+            result += f" momentum score: {ms}/100 (slower growth period)"
+
+    # Business age
+    top_age = row.get("top_business_age")
+    if top_age:
+        cat = top_age["category"]
+        age = top_age["median_age_years"]
+        result += f". most common business type ({cat}) has median age of {age} years"
+
+    return result
 
 
 def _build_area_comparison_narrative(profile_a: dict, profile_b: dict) -> str:
@@ -673,6 +745,7 @@ _RANKING_METRICS = frozenset({
     "businesses_per_1k", "category_count", "new_permits",
     "crime_count", "median_311_days", "solar_installs",
     "total_311_requests", "permit_valuation",
+    "momentum_score",
 })
 
 
@@ -743,16 +816,31 @@ def get_rankings(
     # No category — standard metric ranking
     context = ["population", "median_income", "active_count"]
     extras = [c for c in context if c != sort_by]
-    cols = f"{sort_by} AS sort_value, " + ", ".join(extras)
 
-    sql = f"""
-        SELECT
-            zip_code, neighborhood, {cols}
-        FROM '{profile_path}'
-        WHERE {sort_by} IS NOT NULL
-        ORDER BY {sort_by} {direction}
-        LIMIT {limit}
-    """
+    if sort_by == "momentum_score":
+        mom_path = _AGG / "momentum_scores.parquet"
+        extra_cols = ", ".join(f"np.{c}" for c in extras)
+        sql = f"""
+            SELECT
+                np.zip_code, np.neighborhood,
+                m.momentum_score AS sort_value,
+                {extra_cols}
+            FROM '{profile_path}' np
+            JOIN '{mom_path}' m ON np.zip_code = m.zip_code
+            ORDER BY m.momentum_score {direction}
+            LIMIT {limit}
+        """
+    else:
+        cols = f"{sort_by} AS sort_value, " + ", ".join(extras)
+        sql = f"""
+            SELECT
+                zip_code, neighborhood, {cols}
+            FROM '{profile_path}'
+            WHERE {sort_by} IS NOT NULL
+            ORDER BY {sort_by} {direction}
+            LIMIT {limit}
+        """
+
     rows = _run(sql)
     for i, r in enumerate(rows, 1):
         r["rank"] = i
@@ -948,6 +1036,12 @@ def get_area_profile(area: str) -> dict:
         ORDER BY business_count DESC LIMIT 5
     """, [area])
 
+    # Enrich row for narrative
+    if momentum:
+        row["momentum_score"] = _clean(momentum.get("momentum_score"))
+    if age_stats:
+        row["top_business_age"] = age_stats[0]  # top category by business_count
+
     return {
         "area": row.get("area"),
         "zip_codes": zip_codes if isinstance(zip_codes, list) else [],
@@ -1041,25 +1135,68 @@ def get_area_rankings(
         abc_path = _q("data/aggregated/area_business_by_category.parquet")
         if sort_by == "category_per_1k":
             order_col = "abc.per_1k"
+        elif sort_by == "momentum_score":
+            order_col = "m.momentum_score"
         else:
             order_col = f"ap.{sort_by}"
+
+        if sort_by == "momentum_score":
+            mom_path = _q("data/aggregated/momentum_by_area.parquet")
+            rows = _run(f"""
+                SELECT
+                    ROW_NUMBER() OVER (ORDER BY {order_col} {direction} NULLS LAST) AS rank,
+                    ap.area,
+                    m.momentum_score AS sort_value,
+                    'momentum_score' AS sort_metric,
+                    abc.active_count AS category_active,
+                    abc.per_1k AS category_per_1k,
+                    '{category}' AS category,
+                    ap.population,
+                    ap.median_income,
+                    ap.active_count
+                FROM '{ap_path}' ap
+                JOIN '{mom_path}' m ON ap.area = m.area
+                LEFT JOIN '{abc_path}' abc ON ap.area = abc.area AND abc.category = $1
+                ORDER BY {order_col} {direction} NULLS LAST
+                LIMIT {limit}
+            """, [category])
+        else:
+            rows = _run(f"""
+                SELECT
+                    ROW_NUMBER() OVER (ORDER BY {order_col} {direction} NULLS LAST) AS rank,
+                    ap.area,
+                    ap.{sort_by} AS sort_value,
+                    '{sort_by}' AS sort_metric,
+                    abc.active_count AS category_active,
+                    abc.per_1k AS category_per_1k,
+                    '{category}' AS category,
+                    ap.population,
+                    ap.median_income,
+                    ap.active_count
+                FROM '{ap_path}' ap
+                LEFT JOIN '{abc_path}' abc ON ap.area = abc.area AND abc.category = $1
+                ORDER BY {order_col} {direction} NULLS LAST
+                LIMIT {limit}
+            """, [category])
+    elif sort_by == "momentum_score":
+        mom_path = _q("data/aggregated/momentum_by_area.parquet")
         rows = _run(f"""
             SELECT
-                ROW_NUMBER() OVER (ORDER BY {order_col} {direction} NULLS LAST) AS rank,
+                ROW_NUMBER() OVER (ORDER BY m.momentum_score {direction} NULLS LAST) AS rank,
                 ap.area,
-                ap.{sort_by} AS sort_value,
-                '{sort_by}' AS sort_metric,
-                abc.active_count AS category_active,
-                abc.per_1k AS category_per_1k,
-                '{category}' AS category,
+                m.momentum_score AS sort_value,
+                'momentum_score' AS sort_metric,
+                NULL AS category,
+                NULL AS category_active,
+                NULL AS category_per_1k,
                 ap.population,
                 ap.median_income,
                 ap.active_count
             FROM '{ap_path}' ap
-            LEFT JOIN '{abc_path}' abc ON ap.area = abc.area AND abc.category = $1
-            ORDER BY {order_col} {direction} NULLS LAST
+            JOIN '{mom_path}' m ON ap.area = m.area
+            ORDER BY m.momentum_score {direction} NULLS LAST
             LIMIT {limit}
-        """, [category])
+        """)
     else:
         rows = _run(f"""
             SELECT
