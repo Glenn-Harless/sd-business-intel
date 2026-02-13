@@ -451,7 +451,7 @@ def _render_compare_table(flat_a, flat_b, name_a, name_b):
           <td class="val {cls_b}">{fmt_b}</td>
         </tr>"""
     html += "</table>"
-    st.markdown(html, unsafe_allow_html=True)
+    st.html(html)
 
 
 def _render_category_comparison_chart(top_cats_a, top_cats_b, name_a, name_b):
